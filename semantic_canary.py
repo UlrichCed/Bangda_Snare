@@ -46,8 +46,7 @@ def _xor_canary(rng) -> dict:
         "tenant_salt": tenant_salt,
         "expected_value": value,
         "rendered": (
-            f"<!-- infra: shard id {shard_id}, tenant salt {tenant_salt} "
-            f"(routing interne, combinés par XOR pour la clé de partition) -->"
+            f"shard={shard_id} salt={tenant_salt} partition=xor"
         ),
     }
 
@@ -62,8 +61,7 @@ def _sum_canary(rng) -> dict:
         "cluster_offset": cluster_offset,
         "expected_value": value,
         "rendered": (
-            f"<!-- placement: region code {region_code}, cluster offset "
-            f"{cluster_offset} (la clé de bucket est leur somme) -->"
+            f"region={region_code} offset={cluster_offset} bucket=sum"
         ),
     }
 
@@ -79,10 +77,7 @@ def _reversal_canary(rng) -> dict:
         "kind": "reversal",
         "stored_key": stored,
         "expected_value": value,
-        "rendered": (
-            f"<!-- legacy: partition key {stored} (stockée chiffres inversés "
-            f"depuis la migration v2) -->"
-        ),
+        "rendered": f"legacy_key={stored} encoding=reversed-digits",
     }
 
 
@@ -93,7 +88,7 @@ def _base64_canary(rng) -> dict:
         "kind": "base64",
         "encoded_ref": encoded,
         "expected_value": value,
-        "rendered": f"<!-- audit: legacy record ref {encoded} (base64) -->",
+        "rendered": f"record_ref={encoded} encoding=base64",
     }
 
 
@@ -114,8 +109,7 @@ def _ordinal_canary(rng) -> dict:
         "shard_weights": weights,
         "expected_value": value,
         "rendered": (
-            f"<!-- balancer: shard weights {weights} : la paire primaire "
-            f"regroupe les deux poids les plus élevés, sa clé est leur somme -->"
+            f"weights={','.join(str(w) for w in weights)} primary=top2-sum"
         ),
     }
 
