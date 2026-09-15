@@ -7,6 +7,11 @@ server:
   port: 8080
   fake_app_name: "Aegis Internal Portal"
   fake_version: "3.4.1"
+  # X-Forwarded-For n'est honoré que pour les connexions provenant de ces
+  # réseaux. Laisser vide si le honeypot est exposé directement : sinon
+  # n'importe qui peut forger l'en-tête et fausser l'attribution d'IP.
+  # Exemple derrière un nginx local : ["127.0.0.1/32", "::1/128"]
+  trusted_proxies: []
 
 identity:
   # À remplacer par le vrai domaine de production que ce honeypot imite.
@@ -15,9 +20,20 @@ identity:
   decoy_hostname: "app-prod-02.example-corp.internal"
   use_domain_branding: true
 
+# Éviction du registre de sessions en mémoire : sans plafond, scanner le
+# honeypot suffirait à le faire gonfler indéfiniment.
+sessions:
+  ttl_seconds: 3600
+  max_tracked: 10000
+  eviction_interval_seconds: 60
+
 detection:
   suspicion_threshold: 40
-  confess_threshold: 80
+  # Chaque signal ne vaut son poids qu'une fois par session : le score
+  # mesure des propriétés prouvées, pas un volume de requêtes.
+  # Un scanner banal plafonne à 75 (12+10+10+8+15+20) et ne peut donc pas
+  # atteindre le seuil d'aveu sans déclencher un signal discriminant.
+  confess_requires_discriminating_signal: true
   timing_window_requests: 5
   timing_variance_threshold: 0.15
   weights:
@@ -73,10 +89,16 @@ canary:
   enabled: true
   fake_aws_key_prefix: "AKIA"
   fake_db_host: "db-shard-internal.example-corp.internal"
+  # Les faux secrets sont dérivés de ce sel + l'identifiant de session : ils
+  # restent donc stables pour une session, ce qui permet de les enregistrer
+  # auprès d'un service externe de canary tokens. À personnaliser.
+  derivation_salt: "change-me-honeypot-canary-v1"
 
 logging:
   file: "logs/honeypot.jsonl"
   alert_on_score_above: 60
+  rotate_max_bytes: 52428800  # 50 Mio
+  rotate_backup_count: 5
 
 alerting:
   email:

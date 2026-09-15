@@ -1,0 +1,57 @@
+# Exemple de terminaison nginx devant le honeypot.
+#
+# À adapter : noms de domaine, chemins de certificats, réseau amont. Ce
+# fichier est un point de départ, pas une configuration prête à coller.
+#
+# Rappels de déploiement :
+#  - isolation réseau stricte : jamais sur le même hôte/VLAN qu'une infra
+#    de production réelle ;
+#  - le rate limiting ci-dessous complète le tarpit applicatif, il ne le
+#    remplace pas ;
+#  - si nginx est sur la même machine, déclarer son IP dans
+#    server.trusted_proxies (config.yaml), sinon X-Forwarded-For sera
+#    ignoré et toutes les sessions seront attribuées à 127.0.0.1.
+
+limit_req_zone $binary_remote_addr zone=honeypot:10m rate=30r/m;
+limit_conn_zone $binary_remote_addr zone=honeypot_conn:10m;
+
+upstream honeypot_app {
+    server 127.0.0.1:8080;
+}
+
+server {
+    listen 80;
+    server_name honeypot.example.invalid;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name honeypot.example.invalid;
+
+    ssl_certificate     /etc/letsencrypt/live/honeypot.example.invalid/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/honeypot.example.invalid/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Le honeypot usurpe déjà l'en-tête Server côté applicatif ; on évite que
+    # nginx ne le contredise en annonçant sa propre version.
+    server_tokens off;
+
+    limit_req zone=honeypot burst=20 nodelay;
+    limit_conn honeypot_conn 10;
+
+    location / {
+        proxy_pass http://honeypot_app;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Le tarpit fait délibérément traîner les réponses : ces délais
+        # doivent dépasser deflection.tarpit_max_delay, sinon nginx coupe
+        # les requêtes que le honeypot est en train de ralentir.
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+        proxy_buffering off;
+    }
+}
