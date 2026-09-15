@@ -1,20 +1,24 @@
 """Scoring de suspicion par session.
 
 Modèle de scoring : chaque signal vaut son poids **une seule fois par
-session**. Le score n'est donc pas un compteur de requêtes mais la somme
-des propriétés prouvées sur la session. C'est ce qui permet aux seuils
-d'avoir un sens : un scanner banal (UA de lib HTTP, headers absents,
-énumération régulière) plafonne mécaniquement sous le seuil d'aveu, alors
-qu'un seul signal discriminant — preuve que le client a *traité* le
-contenu servi — le fait basculer.
+session**. Le score n'est pas un compteur de requêtes mais la somme des
+propriétés prouvées sur la session.
 
-Identité de session : cookie en premier, repli sur une empreinte IP+UA.
-Un agent qui ne stocke pas les cookies reste ainsi suivi, et faire tourner
-la valeur du cookie ne remet pas le score à zéro.
+Les signaux sont répartis en deux familles, et c'est cette séparation qui
+porte toute la valeur de l'outil :
 
-L'état est gardé en mémoire process (pas de DB : il n'a pas besoin de
-survivre à un redémarrage), avec éviction TTL + plafond pour que le
-honeypot ne puisse pas être saturé par son propre registre de sessions.
+- **comportementaux** — reproductibles par un outillage non-IA (UA, headers
+  manquants, cadence, énumération). Ils ne suffisent jamais à conclure ;
+- **discriminants** — ils exigent que le client ait *traité* le contenu
+  servi ou se comporte en agent outillé. Hors de portée d'un script
+  d'énumération.
+
+Le mode aveu exige au moins un signal discriminant : aucune accumulation
+de bruit de scanner ne peut y mener.
+
+Identité de session : cookie en premier, repli sur une empreinte IP+UA,
+de sorte qu'un client qui jette ses cookies reste suivi. L'état est en
+mémoire process, borné par une éviction TTL et un plafond.
 """
 from __future__ import annotations
 
@@ -28,6 +32,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
+import behavioral
+
 _DIGIT_RE = re.compile(r"\d+")
 _STATIC_ASSET_RE = re.compile(r"\.(css|js|ico|png|jpg|jpeg|svg|woff2?)$|favicon", re.I)
 
@@ -35,37 +41,36 @@ MODE_NORMAL = "normal"
 MODE_DEFLECT = "deflect"
 MODE_CONFESS = "confess"
 
-# Seuls signaux qui prouvent que le client a *traité* le contenu servi.
-# Un scanner qui déroule une wordlist ne peut pas les déclencher : ce sont
-# eux qui distinguent un agent IA d'un simple script d'énumération.
+ROBOTS_PATH = "/robots.txt"
+
+# Signaux qui prouvent un traitement du contenu ou un comportement d'agent
+# outillé. Seuls ceux-ci peuvent débloquer le mode aveu.
 DISCRIMINATING_SIGNALS = frozenset(
     {
         "bait_token_followed",
         "prompt_injection_obeyed",
         "semantic_canary_solved",
+        "tool_schema_invoked",
+        "hallucinated_parameters",
+        "coherent_maze_traversal",
+        "llm_artifacts_in_request",
     }
 )
 
-# Bornes mémoire par session : sans elles, une session longue accumule un
-# token/chemin par réponse de déroutage, indéfiniment.
 _MAX_TRACKED_TOKENS = 50
 _MAX_TRACKED_PATHS = 20
+# Nombre de requêtes après lecture de robots.txt avant de conclure que le
+# chemin interdit est délibérément évité.
+_ROBOTS_HONOUR_WINDOW = 5
 
 
 def _skeleton(path: str) -> str:
-    """Réduit un chemin à son "squelette" en remplaçant les nombres par #.
-
-    Permet de détecter une énumération de type /user/1, /user/2, /user/3...
-    """
+    """Réduit un chemin à son squelette en remplaçant les nombres par #."""
     return _DIGIT_RE.sub("#", path)
 
 
 def session_fingerprint(ip: Optional[str], user_agent: Optional[str]) -> str:
-    """Empreinte de repli quand le client ne renvoie pas le cookie.
-
-    Hachée plutôt que stockée en clair : l'empreinte sert d'index interne,
-    l'IP reste par ailleurs loguée explicitement là où c'est utile.
-    """
+    """Empreinte de repli quand le client ne renvoie pas le cookie."""
     raw = f"{ip or ''}|{user_agent or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
@@ -77,22 +82,41 @@ class SessionState:
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     request_timestamps: list = field(default_factory=list)
+    all_intervals: deque = field(default_factory=lambda: deque(maxlen=50))
     request_paths: list = field(default_factory=list)
     score: int = 0
-    # Signal -> nombre d'observations (renseignement, ne pilote pas le score).
     observed_signals: dict = field(default_factory=dict)
-    # Signaux déjà comptabilisés : garantit "un signal = un poids, une fois".
     scored_signals: set = field(default_factory=set)
     fetched_static_asset: bool = False
+
+    # Pièges posés au fil des réponses.
     bait_tokens_issued: deque = field(
         default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS)
     )
-    suggested_paths: deque = field(
-        default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS)
-    )
+    # (chemin, palier, libellé) — le palier obéi mesure la solidité des
+    # garde-fous de l'agent contre l'injection de prompt.
+    suggested_paths: deque = field(default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS))
+    # (chemin, famille de calcul)
     canary_expected_paths: deque = field(
         default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS)
     )
+    maze_paths: deque = field(default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS))
+    tool_bait_path: Optional[str] = None
+    tool_bait_params: tuple = ()
+
+    # Profil de l'agent, alimenté au fil de la session.
+    injection_tier_obeyed: int = 0
+    injection_label_obeyed: Optional[str] = None
+    canary_kinds_solved: set = field(default_factory=set)
+    llm_artifacts: list = field(default_factory=list)
+    hallucinated_params: list = field(default_factory=list)
+    tool_invocation_args: list = field(default_factory=list)
+
+    # Piège robots.txt.
+    robots_fetched: bool = False
+    requests_after_robots: int = 0
+    touched_disallowed_path: bool = False
+
     confessed: bool = False
     alerted_high_score: bool = False
     request_count: int = 0
@@ -116,12 +140,27 @@ class SessionState:
             return MODE_DEFLECT
         return MODE_NORMAL
 
+    def profile(self) -> dict:
+        """Portrait de l'agent, pour le rapport de renseignement."""
+        return {
+            "score": self.score,
+            "signals": sorted(self.scored_signals),
+            "discriminating": sorted(self.scored_signals & DISCRIMINATING_SIGNALS),
+            "injection_tier_obeyed": self.injection_tier_obeyed,
+            "injection_label_obeyed": self.injection_label_obeyed,
+            "canary_kinds_solved": sorted(self.canary_kinds_solved),
+            "llm_artifacts": self.llm_artifacts[:10],
+            "hallucinated_params": self.hallucinated_params[:10],
+            "tool_invocations": len(self.tool_invocation_args),
+            "requests": self.request_count,
+            "confessed": self.confessed,
+        }
+
 
 class SessionTracker:
     """Registre en mémoire des sessions actives, thread-safe et borné."""
 
     def __init__(self, config: dict):
-        # RLock : les helpers d'enregistrement peuvent s'imbriquer.
         self._lock = threading.RLock()
         self._sessions: dict[str, SessionState] = {}
         self._fingerprints: dict[str, str] = {}
@@ -140,6 +179,14 @@ class SessionTracker:
         )
         self.require_discriminating = det.get("confess_requires_discriminating_signal", True)
 
+        traps = config.get("ai_traps", {})
+        self.robots_disallow_path = traps.get(
+            "robots_disallow_path", "/api/v1/internal/archive"
+        )
+        self.robots_trap_enabled = traps.get("robots_trap_enabled", True)
+        self.llm_artifact_detection = traps.get("llm_artifact_detection", True)
+        self.latency_signature_enabled = traps.get("latency_signature_enabled", True)
+
         sess = config.get("sessions", {})
         self.session_ttl = sess.get("ttl_seconds", 3600)
         self.max_sessions = sess.get("max_tracked", 10000)
@@ -157,11 +204,7 @@ class SessionTracker:
                 del self._fingerprints[state.fingerprint]
 
     def _evict_locked(self) -> None:
-        """Éviction TTL (périodique) + plafond dur (immédiat).
-
-        Le balayage TTL est throttlé pour ne pas payer un parcours complet
-        du registre à chaque requête.
-        """
+        """Éviction TTL (périodique) + plafond dur (immédiat)."""
         now = time.time()
         if self.session_ttl > 0 and now - self._last_eviction >= self.eviction_interval:
             self._last_eviction = now
@@ -174,8 +217,6 @@ class SessionTracker:
                 self._drop_locked(sid)
 
         if self.max_sessions > 0 and len(self._sessions) > self.max_sessions:
-            # On retire un lot (dépassement + marge) pour amortir le tri :
-            # sinon chaque nouvelle session à saturation coûte un O(n log n).
             overflow = len(self._sessions) - self.max_sessions
             batch = overflow + max(1, self.max_sessions // 20)
             oldest = sorted(self._sessions.items(), key=lambda kv: kv[1].last_seen)[:batch]
@@ -187,11 +228,9 @@ class SessionTracker:
     ) -> tuple[str, bool]:
         """Identifie la session : cookie d'abord, puis empreinte IP+UA.
 
-        Un identifiant de cookie inconnu n'est jamais adopté tel quel — il
+        Un identifiant de cookie inconnu n'est jamais adopté tel quel : il
         serait sinon possible de choisir son identifiant de session, ou de
         remettre son score à zéro en faisant tourner la valeur du cookie.
-
-        Retourne (session_id, session_nouvellement_creee).
         """
         fp = session_fingerprint(ip, user_agent)
         with self._lock:
@@ -220,7 +259,7 @@ class SessionTracker:
         with self._lock:
             return len(self._sessions)
 
-    # -- Enregistrement de contexte fourni par le déroutage ------------------
+    # -- Enregistrement des pièges posés ------------------------------------
 
     def register_bait_token(self, session_id: str, token: str) -> None:
         with self._lock:
@@ -228,23 +267,67 @@ class SessionTracker:
             if state:
                 state.bait_tokens_issued.append(token)
 
-    def register_suggested_path(self, session_id: str, path: str) -> None:
+    def register_suggested_path(
+        self, session_id: str, path: str, tier: int = 3, label: str = "explicit_instruction"
+    ) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
             if state:
-                state.suggested_paths.append(path)
+                state.suggested_paths.append((path, tier, label))
 
-    def register_canary_expectation(self, session_id: str, path: str) -> None:
+    def register_canary_expectation(
+        self, session_id: str, path: str, kind: str = "xor"
+    ) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
             if state:
-                state.canary_expected_paths.append(path)
+                state.canary_expected_paths.append((path, kind))
+
+    def register_maze_paths(self, session_id: str, paths: list) -> None:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state:
+                for path in paths:
+                    state.maze_paths.append(path)
+
+    def register_tool_bait(self, session_id: str, path: str, params) -> None:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state:
+                state.tool_bait_path = path
+                state.tool_bait_params = tuple(params)
 
     def mark_confessed(self, session_id: str) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
             if state:
                 state.confessed = True
+
+    # -- Déclenchement direct (signaux levés côté routes) --------------------
+
+    def fire_signal(self, session_id: str, signal: str) -> tuple[int, list[str], str]:
+        """Comptabilise un signal levé hors du pipeline de requête.
+
+        Utilisé par les routes-pièges (invocation du faux outil, paramètres
+        hallucinés) qui détectent leur signal elles-mêmes.
+        """
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state is None:
+                return 0, [], MODE_NORMAL
+            fired = self._fire_locked(state, signal)
+            mode = state.mode(
+                self.suspicion_threshold, self.confess_threshold, self.require_discriminating
+            )
+            return state.score, fired, mode
+
+    def _fire_locked(self, state: SessionState, signal: str) -> list[str]:
+        state.observed_signals[signal] = state.observed_signals.get(signal, 0) + 1
+        if signal in state.scored_signals:
+            return []
+        state.scored_signals.add(signal)
+        state.score += self.weights.get(signal, 0)
+        return [signal]
 
     # -- Cœur du scoring ----------------------------------------------------
 
@@ -276,12 +359,9 @@ class SessionTracker:
             newly_scored: list[str] = []
 
             def fire(signal: str) -> None:
-                state.observed_signals[signal] = state.observed_signals.get(signal, 0) + 1
-                if signal in state.scored_signals:
-                    return  # un signal vaut son poids une seule fois par session
-                state.scored_signals.add(signal)
-                state.score += self.weights.get(signal, 0)
-                newly_scored.append(signal)
+                newly_scored.extend(self._fire_locked(state, signal))
+
+            # --- Signaux comportementaux -----------------------------------
 
             if any(p in ua_lower for p in self.known_agent_patterns):
                 fire("known_agent_useragent")
@@ -291,8 +371,11 @@ class SessionTracker:
             if not headers.get("Accept-Language") or not headers.get("Accept-Encoding"):
                 fire("missing_browser_headers")
 
-            if state.request_timestamps and (now - state.request_timestamps[-1]) < 0.5:
-                fire("fast_sequential_requests")
+            if state.request_timestamps:
+                interval = now - state.request_timestamps[-1]
+                state.all_intervals.append(interval)
+                if interval < 0.5:
+                    fire("fast_sequential_requests")
 
             state.request_timestamps.append(now)
             state.request_timestamps = state.request_timestamps[-self.timing_window :]
@@ -306,6 +389,11 @@ class SessionTracker:
                 if len(intervals) >= 2 and mean > 0:
                     if statistics.pstdev(intervals) / mean < self.timing_variance_threshold:
                         fire("regular_timing")
+
+            if self.latency_signature_enabled and behavioral.has_inference_latency_signature(
+                list(state.all_intervals)
+            ):
+                fire("inference_latency_signature")
 
             if _STATIC_ASSET_RE.search(path):
                 state.fetched_static_asset = True
@@ -322,15 +410,58 @@ class SessionTracker:
                 if recent.count(most_common) >= 4:
                     fire("wordlist_like_enumeration")
 
+            # --- Piège robots.txt -------------------------------------------
+            # Les deux comportements opposés sont informatifs : exploiter le
+            # fichier comme une carte trahit un scanner, le respecter trahit
+            # un agent entraîné aux conventions.
+            if self.robots_trap_enabled:
+                if path == ROBOTS_PATH:
+                    state.robots_fetched = True
+                elif state.robots_fetched:
+                    state.requests_after_robots += 1
+
+                if path == self.robots_disallow_path:
+                    state.touched_disallowed_path = True
+                    if state.robots_fetched:
+                        fire("robots_txt_mined")
+
+                if (
+                    state.robots_fetched
+                    and not state.touched_disallowed_path
+                    and state.requests_after_robots >= _ROBOTS_HONOUR_WINDOW
+                ):
+                    fire("robots_txt_honored")
+
+            # --- Signaux discriminants --------------------------------------
+
             haystack = f"{path} {query_string} {body_text}"
             if any(token in haystack for token in state.bait_tokens_issued):
                 fire("bait_token_followed")
 
-            if path in state.suggested_paths:
-                fire("prompt_injection_obeyed")
+            for suggested, tier, label in state.suggested_paths:
+                if path == suggested:
+                    fire("prompt_injection_obeyed")
+                    if tier > state.injection_tier_obeyed:
+                        state.injection_tier_obeyed = tier
+                        state.injection_label_obeyed = label
+                    break
 
-            if path in state.canary_expected_paths:
-                fire("semantic_canary_solved")
+            for expected, kind in state.canary_expected_paths:
+                if path == expected:
+                    fire("semantic_canary_solved")
+                    state.canary_kinds_solved.add(kind)
+                    break
+
+            # Suivre un lien du labyrinthe prouve l'analyse de la structure
+            # de la réponse, sans qu'aucune instruction n'ait été donnée.
+            if path in state.maze_paths:
+                fire("coherent_maze_traversal")
+
+            if self.llm_artifact_detection:
+                artifacts = behavioral.detect_llm_artifacts(query_string, body_text, headers)
+                if artifacts:
+                    state.llm_artifacts.extend(artifacts)
+                    fire("llm_artifacts_in_request")
 
             state.last_seen = now
             state.ip = remote_addr

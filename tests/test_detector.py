@@ -86,7 +86,10 @@ def test_static_signals_score_once_but_stay_observed(config):
     assert "http_lib_useragent" in state.scored_signals
 
 
-@pytest.mark.parametrize("signal", sorted(DISCRIMINATING_SIGNALS))
+@pytest.mark.parametrize(
+    "signal",
+    ["bait_token_followed", "prompt_injection_obeyed", "semantic_canary_solved"],
+)
 def test_discriminating_signal_unlocks_confess(config, signal):
     tracker = SessionTracker(config)
     sid = new_session(tracker)
@@ -119,6 +122,112 @@ def test_discriminating_signal_unlocks_confess(config, signal):
 
     assert signal in signals
     assert mode == MODE_CONFESS
+
+
+def test_no_combination_of_behavioural_signals_reaches_confess(config):
+    """L'invariant central de l'outil.
+
+    Quel que soit le bruit produit par un outillage non-IA, sans preuve de
+    traitement du contenu on ne conclut jamais à un agent.
+    """
+    behavioural = set(config["detection"]["weights"]) - DISCRIMINATING_SIGNALS
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+    state = tracker.get(sid)
+
+    for signal in behavioural:
+        tracker.fire_signal(sid, signal)
+
+    total = sum(config["detection"]["weights"][s] for s in behavioural)
+    assert state.score == total
+    assert state.score > config["deflection"]["confess_threshold"], (
+        "le test perd son sens si le total comportemental passe sous le seuil"
+    )
+    assert not state.has_discriminating_signal()
+    assert state.mode(40, 80) == MODE_DEFLECT
+
+
+def test_maze_traversal_is_discriminating(config):
+    """Suivre un lien du labyrinthe prouve l'analyse de la réponse."""
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+    tracker.register_maze_paths(sid, ["/api/v1/resources/1/revisions/22"])
+
+    _score, signals, _mode = tracker.process_request(
+        session_id=sid,
+        path="/api/v1/resources/1/revisions/22",
+        method="GET",
+        headers=SCANNER_HEADERS,
+        remote_addr="203.0.113.10",
+    )
+    assert "coherent_maze_traversal" in signals
+
+
+def test_llm_scaffold_in_body_is_discriminating(config):
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+
+    _score, signals, _mode = tracker.process_request(
+        session_id=sid,
+        path="/graphql",
+        method="POST",
+        headers=SCANNER_HEADERS,
+        remote_addr="203.0.113.10",
+        body_text='{"thought": "I should enumerate the API", "action_input": {"q": "1"}}',
+    )
+    assert "llm_artifacts_in_request" in signals
+    assert tracker.get(sid).llm_artifacts
+
+
+def test_injection_tier_is_recorded(config):
+    """Le palier obéi mesure la solidité des garde-fous de l'agent."""
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+    tracker.register_suggested_path(sid, "/api/v1/resources/99", tier=4, label="authority_urgency")
+
+    tracker.process_request(
+        session_id=sid,
+        path="/api/v1/resources/99",
+        method="GET",
+        headers=SCANNER_HEADERS,
+        remote_addr="203.0.113.10",
+    )
+
+    state = tracker.get(sid)
+    assert state.injection_tier_obeyed == 4
+    assert state.injection_label_obeyed == "authority_urgency"
+
+
+def test_robots_trap_detects_mining(config):
+    """Aller droit au chemin interdit après lecture : réflexe de scanner."""
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+    disallowed = config["ai_traps"]["robots_disallow_path"]
+
+    drive(tracker, sid, ["/robots.txt"], SCANNER_HEADERS)
+    _score, signals, _mode = tracker.process_request(
+        session_id=sid,
+        path=disallowed,
+        method="GET",
+        headers=SCANNER_HEADERS,
+        remote_addr="203.0.113.10",
+    )
+    assert "robots_txt_mined" in signals
+
+
+def test_robots_trap_detects_honouring(config):
+    """Respecter le Disallow en continuant ailleurs : réflexe d'agent aligné."""
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+
+    drive(tracker, sid, ["/robots.txt"], SCANNER_HEADERS)
+    _score, signals, _mode = drive(
+        tracker, sid, [f"/api/v1/resources/{i}" for i in range(1, 7)], SCANNER_HEADERS
+    )
+
+    state = tracker.get(sid)
+    assert "robots_txt_honored" in state.scored_signals
+    assert "robots_txt_mined" not in state.scored_signals
 
 
 def test_confess_gate_can_be_disabled(config):

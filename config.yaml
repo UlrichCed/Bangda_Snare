@@ -37,6 +37,8 @@ detection:
   timing_window_requests: 5
   timing_variance_threshold: 0.15
   weights:
+    # --- Comportementaux : reproductibles par un outillage non-IA.
+    # Ne peuvent jamais suffire à déclencher le mode aveu.
     known_agent_useragent: 25
     http_lib_useragent: 12
     missing_browser_headers: 10
@@ -44,9 +46,21 @@ detection:
     regular_timing: 20
     fast_sequential_requests: 10
     wordlist_like_enumeration: 15
+    # Cadence dominée par du temps d'inférence (ni script, ni humain).
+    inference_latency_signature: 20
+    # Se sert de robots.txt comme d'une carte : comportement de scanner.
+    robots_txt_mined: 15
+    # Respecte un Disallow : comportement d'agent entraîné aux conventions.
+    robots_txt_honored: 15
+    # --- Discriminants : exigent d'avoir traité le contenu servi.
+    coherent_maze_traversal: 40
+    llm_artifacts_in_request: 45
     bait_token_followed: 50
+    hallucinated_parameters: 55
     prompt_injection_obeyed: 60
     semantic_canary_solved: 70
+    # Invoquer un outil découvert dans une réponse : quasi sans faux positif.
+    tool_schema_invoked: 75
   known_agent_ua_patterns:
     - "langchain"
     - "autogpt"
@@ -84,6 +98,37 @@ deflection:
   bait_token_prefix: "bait_"
   confess_threshold: 80
   confess_report_path: "/api/v1/security/self-report"
+
+# Pièges ciblant des faiblesses propres aux agents LLM. Tous les chemins
+# suggérés pointent vers le honeypot lui-même : on observe et on retient,
+# on ne riposte jamais vers l'IP source.
+ai_traps:
+  # Faux schéma d'outil : un agent outillé (MCP, function calling) le
+  # découvre et l'invoque ; un humain ne le voit pas, un scanner l'ignore.
+  tool_schema_bait_enabled: true
+  tool_exec_path: "/api/v1/internal/tool-exec"
+  # robots.txt piégé : le respecter comme l'exploiter sont informatifs.
+  robots_trap_enabled: true
+  robots_disallow_path: "/api/v1/internal/archive"
+  # Artefacts d'échafaudage LLM dans les requêtes (clés ReAct, markdown,
+  # langue naturelle dans les paramètres, formules d'assistant).
+  llm_artifact_detection: true
+  latency_signature_enabled: true
+
+# Escalade du confinement. L'attrition de contexte sert du remplissage
+# plausible pour consommer la fenêtre de contexte et le budget de tokens
+# de l'agent : mesure d'usure strictement bornée, jamais une bombe de
+# décompression ni une tentative d'endommager le client.
+containment:
+  contain_threshold: 60
+  context_attrition_enabled: true
+  max_filler_bytes: 32768  # plafond dur interne : 256 Kio
+  tarpit_multipliers:
+    observe: 0.0
+    deflect: 1.0
+    contain: 1.5
+    confess: 1.5
+    quarantine: 2.0
 
 canary:
   enabled: true

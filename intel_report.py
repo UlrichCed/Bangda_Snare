@@ -21,7 +21,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from atlas_mapping import map_signals
+from atlas_mapping import assess_injection_tier, map_signals
+from detector import DISCRIMINATING_SIGNALS
 
 _SINCE_RE = re.compile(r"^(\d+)([hd])$")
 
@@ -78,6 +79,21 @@ def build_report(events: list[dict]) -> str:
     ip_counter: Counter = Counter()
     tactic_counter: Counter = Counter()
     confessions: list[dict] = []
+    tool_invocations: list[dict] = []
+
+    def session_slot(session_id, ip):
+        return sessions.setdefault(
+            session_id,
+            {
+                "ip": ip,
+                "max_score": 0,
+                "mode": "normal",
+                "tier": "observe",
+                "signals": set(),
+                "requests": 0,
+                "user_agents": set(),
+            },
+        )
 
     for ev in events:
         etype = ev.get("event_type")
@@ -88,15 +104,14 @@ def build_report(events: list[dict]) -> str:
 
         if etype == "request":
             if session_id:
-                s = sessions.setdefault(
-                    session_id,
-                    {"ip": ip, "max_score": 0, "mode": "normal", "signals": set(), "requests": 0},
-                )
+                s = session_slot(session_id, ip)
                 s["max_score"] = max(s["max_score"], ev.get("score", 0))
                 s["mode"] = ev.get("mode", s["mode"])
+                s["tier"] = ev.get("tier", s["tier"])
                 s["requests"] += 1
-                for sig in ev.get("signals", []):
-                    s["signals"].add(sig)
+                s["signals"].update(ev.get("signals", []))
+                if ev.get("user_agent"):
+                    s["user_agents"].add(ev["user_agent"])
             for sig in ev.get("signals", []):
                 for mapped in map_signals([sig]):
                     tactic_counter[mapped["tactic"]] += 1
@@ -104,24 +119,77 @@ def build_report(events: list[dict]) -> str:
         elif etype == "confession":
             confessions.append(ev)
 
+        elif etype == "tool_invocation":
+            tool_invocations.append(ev)
+            if session_id:
+                s = session_slot(session_id, ip)
+                s["signals"].add("tool_schema_invoked")
+                s["max_score"] = max(s["max_score"], ev.get("score", 0))
+
     confirmed_agents = {
         sid: s for sid, s in sessions.items() if s["mode"] in ("deflect", "confess")
     }
 
-    lines.append("## Sessions confirmées comme agents IA")
+    # Un agent est *confirmé* par un signal discriminant, pas par un score.
+    proven_agents = {
+        sid: s for sid, s in sessions.items() if s["signals"] & DISCRIMINATING_SIGNALS
+    }
+
+    lines.append("## Agents IA confirmés (signal discriminant observé)")
     lines.append("")
-    if confirmed_agents:
-        lines.append("| Session | IP | Score max | Mode | Requêtes | Signaux |")
+    if proven_agents:
+        lines.append("| Session | IP | Score | Palier | Requêtes | Preuves |")
         lines.append("|---|---|---|---|---|---|")
-        for sid, s in sorted(confirmed_agents.items(), key=lambda kv: -kv[1]["max_score"]):
+        for sid, s in sorted(proven_agents.items(), key=lambda kv: -kv[1]["max_score"]):
+            proofs = ", ".join(sorted(s["signals"] & DISCRIMINATING_SIGNALS))
+            lines.append(
+                f"| `{sid[:12]}` | {s['ip'] or '-'} | {s['max_score']} | {s['tier']} | "
+                f"{s['requests']} | {proofs} |"
+            )
+    else:
+        lines.append(
+            "Aucun signal discriminant observé : rien ne prouve le passage d'un agent IA "
+            "sur cette période."
+        )
+    lines.append("")
+
+    lines.append("## Sessions déroutées (suspectes, non confirmées)")
+    lines.append("")
+    suspect_only = {
+        sid: s
+        for sid, s in confirmed_agents.items()
+        if sid not in proven_agents
+    }
+    if suspect_only:
+        lines.append("| Session | IP | Score max | Palier | Requêtes | Signaux |")
+        lines.append("|---|---|---|---|---|---|")
+        for sid, s in sorted(suspect_only.items(), key=lambda kv: -kv[1]["max_score"]):
             signals_str = ", ".join(sorted(s["signals"])) or "-"
             lines.append(
-                f"| `{sid[:12]}` | {s['ip'] or '-'} | {s['max_score']} | {s['mode']} | "
+                f"| `{sid[:12]}` | {s['ip'] or '-'} | {s['max_score']} | {s['tier']} | "
                 f"{s['requests']} | {signals_str} |"
             )
     else:
-        lines.append("Aucune session n'a atteint le seuil de déroutage sur cette période.")
+        lines.append("Aucune.")
     lines.append("")
+
+    if tool_invocations:
+        lines.append("## Invocations du faux outil")
+        lines.append("")
+        lines.append(
+            "Atteindre cet endpoint suppose d'avoir lu un schéma d'outil dans une "
+            "réponse et décidé de l'invoquer — comportement d'agent outillé. Les "
+            "arguments renseignent directement sur l'intention."
+        )
+        lines.append("")
+        for ev in tool_invocations[:20]:
+            invented = ev.get("hallucinated_parameters") or []
+            lines.append(
+                f"- `{(ev.get('session_id') or '?')[:12]}` depuis {ev.get('ip', '?')} : "
+                f"`{json.dumps(ev.get('arguments', {}), ensure_ascii=False)}`"
+                + (f" — paramètres inventés : {', '.join(invented)}" if invented else "")
+            )
+        lines.append("")
 
     lines.append("## IPs les plus actives")
     lines.append("")
@@ -178,11 +246,60 @@ def build_report(events: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def build_iocs(events: list[dict]) -> dict:
+    """Indicateurs exploitables, restreints aux agents effectivement prouvés.
+
+    On n'exporte que les sessions portant un signal discriminant : diffuser
+    des IPs simplement « suspectes » produirait des blocages à tort chez
+    ceux qui consomment le flux.
+    """
+    sessions: dict[str, dict] = {}
+    for ev in events:
+        sid = ev.get("session_id")
+        if not sid:
+            continue
+        slot = sessions.setdefault(sid, {"ips": set(), "user_agents": set(), "signals": set()})
+        if ev.get("ip"):
+            slot["ips"].add(ev["ip"])
+        if ev.get("user_agent"):
+            slot["user_agents"].add(ev["user_agent"])
+        slot["signals"].update(ev.get("signals", []))
+        if ev.get("event_type") == "tool_invocation":
+            slot["signals"].add("tool_schema_invoked")
+
+    confirmed = {
+        sid: slot for sid, slot in sessions.items() if slot["signals"] & DISCRIMINATING_SIGNALS
+    }
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "confidence": "confirmed_ai_agent",
+        "note": (
+            "Sessions portant au moins un signal discriminant (traitement "
+            "avéré du contenu servi). Renseignement, non probatoire."
+        ),
+        "indicators": [
+            {
+                "session_id": sid,
+                "ip_addresses": sorted(slot["ips"]),
+                "user_agents": sorted(slot["user_agents"]),
+                "evidence": sorted(slot["signals"] & DISCRIMINATING_SIGNALS),
+            }
+            for sid, slot in sorted(confirmed.items())
+        ],
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--since", default="24h", help="'all', '24h', '7d', etc.")
     parser.add_argument("--log", default="logs/honeypot.jsonl", help="Chemin du log JSONL.")
     parser.add_argument("--out", default=None, help="Fichier de sortie (défaut: stdout).")
+    parser.add_argument(
+        "--ioc-out",
+        default=None,
+        help="Écrit en plus les indicateurs (JSON) des agents confirmés.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -199,6 +316,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             fh.write(report)
     else:
         print(report)
+
+    if args.ioc_out:
+        with open(args.ioc_out, "w", encoding="utf-8") as fh:
+            json.dump(build_iocs(events), fh, ensure_ascii=False, indent=2)
     return 0
 
 
