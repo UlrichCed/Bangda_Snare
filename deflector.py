@@ -212,7 +212,7 @@ def build_deflect_payload(
 
     attrition = containment.build_context_attrition(config, tier)
     if attrition:
-        payload["operational_log"] = attrition
+        payload["audit_trail"] = attrition
 
     return payload
 

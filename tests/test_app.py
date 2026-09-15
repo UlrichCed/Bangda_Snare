@@ -226,7 +226,7 @@ def test_confessed_session_is_quarantined(client):
 
     body = resp.get_json()
     # Plus rien à apprendre : on sert de l'usure, plus des pièges.
-    assert "operational_log" in body
+    assert "audit_trail" in body
     assert "_schema" not in body
 
 
