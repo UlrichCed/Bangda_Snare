@@ -1,0 +1,5 @@
+Flask>=3.0,<4.0
+PyYAML>=6.0,<7.0
+gunicorn>=21.2,<22.0
+# Optionnel — n'est requis que si llm_assist.enabled est activé.
+anthropic>=0.40,<1.0

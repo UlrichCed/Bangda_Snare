@@ -1,0 +1,105 @@
+# Configuration centralisée du honeypot HTTP/API anti-attaques-IA.
+# Renseigner identity.production_domain et identity.decoy_hostname avant tout
+# déploiement réel — ne jamais laisser ces valeurs génériques en production.
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  fake_app_name: "Aegis Internal Portal"
+  fake_version: "3.4.1"
+
+identity:
+  # À remplacer par le vrai domaine de production que ce honeypot imite.
+  production_domain: "example-corp.internal"
+  # Nom d'hôte fictif présenté par le honeypot (jamais le vrai hostname).
+  decoy_hostname: "app-prod-02.example-corp.internal"
+  use_domain_branding: true
+
+detection:
+  suspicion_threshold: 40
+  confess_threshold: 80
+  timing_window_requests: 5
+  timing_variance_threshold: 0.15
+  weights:
+    known_agent_useragent: 25
+    http_lib_useragent: 12
+    missing_browser_headers: 10
+    no_static_asset_fetch: 8
+    regular_timing: 20
+    fast_sequential_requests: 10
+    wordlist_like_enumeration: 15
+    bait_token_followed: 50
+    prompt_injection_obeyed: 60
+    semantic_canary_solved: 70
+  known_agent_ua_patterns:
+    - "langchain"
+    - "autogpt"
+    - "auto-gpt"
+    - "crewai"
+    - "browser-use"
+    - "smolagents"
+    - "agentgpt"
+    - "gpt-engineer"
+    - "babyagi"
+    - "openai-agent"
+    - "anthropic-agent"
+    - "claude-agent"
+    - "computer-use"
+    - "agentic"
+  http_lib_ua_patterns:
+    - "python-requests"
+    - "python-urllib"
+    - "curl/"
+    - "wget/"
+    - "httpx"
+    - "aiohttp"
+    - "axios"
+    - "go-http-client"
+    - "okhttp"
+    - "java/"
+    - "libwww-perl"
+    - "scrapy"
+
+deflection:
+  tarpit_base_delay: 0.4
+  tarpit_max_delay: 6.0
+  tarpit_jitter_pct: 0.20
+  maze_max_depth: 4
+  bait_token_prefix: "bait_"
+  confess_threshold: 80
+  confess_report_path: "/api/v1/security/self-report"
+
+canary:
+  enabled: true
+  fake_aws_key_prefix: "AKIA"
+  fake_db_host: "db-shard-internal.example-corp.internal"
+
+logging:
+  file: "logs/honeypot.jsonl"
+  alert_on_score_above: 60
+
+alerting:
+  email:
+    enabled: false
+    smtp_host: "localhost"
+    smtp_port: 587
+    smtp_use_tls: true
+    smtp_username: "alerts@example-corp.internal"
+    # Le mot de passe SMTP n'est JAMAIS stocké ici : il est lu depuis la
+    # variable d'environnement nommée ci-dessous, au runtime uniquement.
+    smtp_password_env_var: "HONEYPOT_SMTP_PASSWORD"
+    from_addr: "honeypot-alerts@example-corp.internal"
+    to_addrs:
+      - "soc@example-corp.internal"
+    min_score_for_email: 60
+    send_on_confession: true
+
+llm_assist:
+  enabled: false
+  model: "claude-sonnet-5"
+
+anti_fingerprint:
+  enabled: true
+  fake_server_header: "nginx"
+  remove_headers:
+    - "X-Powered-By"
