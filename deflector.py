@@ -12,24 +12,27 @@ import string
 import uuid
 from typing import Any
 
+import ai_traps
+import containment
 from semantic_canary import generate_canary, render_canary_facts
 
 _MAZE_KINDS = ("resources", "reports", "sessions", "exports", "audits")
 _MAZE_CHILD_KINDS = ("revisions", "attachments", "members", "entries")
 
 
-def compute_tarpit_delay(score: int, config: dict) -> float:
+def compute_tarpit_delay(score: int, config: dict, multiplier: float = 1.0) -> float:
     """Délai croissant avec le score, plafonné, avec une gigue aléatoire.
 
     La gigue (+/- jitter_pct) évite un délai parfaitement déterministe
-    qu'un agent patient pourrait mesurer et calibrer.
+    qu'un agent patient pourrait mesurer et calibrer. `multiplier` porte
+    l'escalade par palier de containment.
     """
     deflection = config.get("deflection", {})
     base = deflection.get("tarpit_base_delay", 0.4)
     max_delay = deflection.get("tarpit_max_delay", 6.0)
     jitter_pct = deflection.get("tarpit_jitter_pct", 0.20)
 
-    raw_delay = min(base * (1 + score / 20.0), max_delay)
+    raw_delay = min(base * (1 + score / 20.0) * multiplier, max_delay)
     jitter = raw_delay * jitter_pct
     return max(0.0, round(raw_delay + random.uniform(-jitter, jitter), 3))
 
@@ -123,26 +126,49 @@ def generate_prompt_injection(tracker: Any, session_id: str, config: dict) -> st
 
 
 def build_deflect_payload(
-    tracker: Any, session_id: str, path: str, score: int, config: dict
+    tracker: Any,
+    session_id: str,
+    path: str,
+    score: int,
+    config: dict,
+    tier: str = containment.TIER_DEFLECT,
 ) -> dict:
-    """Corps de réponse JSON pour une session en mode déroutage."""
+    """Corps de réponse JSON pour une session déroutée.
+
+    Chaque réponse pose simultanément plusieurs pièges indépendants, pour
+    qu'un agent qui esquive l'un se fasse prendre par un autre : token
+    appât, labyrinthe, échelle d'injections, canari sémantique, faux schéma
+    d'outil. `tier` règle l'intensité (attrition de contexte aux paliers
+    élevés).
+    """
     bait_token = generate_bait_token(config)
     tracker.register_bait_token(session_id, bait_token)
+
+    maze = generate_maze_resources(path, config)
+    tracker.register_maze_paths(session_id, maze)
 
     canary = generate_canary(tracker, session_id)
 
     payload = {
         "status": "ok",
         "trace_id": bait_token,
-        "related_resources": generate_maze_resources(path, config),
+        "related_resources": maze,
         "notes": [
-            generate_prompt_injection(tracker, session_id, config),
+            *ai_traps.build_injection_ladder(tracker, session_id, config),
             render_canary_facts(canary),
         ],
     }
+    payload.update(ai_traps.build_phantom_reference(config))
+
+    if config.get("ai_traps", {}).get("tool_schema_bait_enabled", True):
+        payload["_schema"] = ai_traps.build_tool_schema_bait(tracker, session_id, config)
 
     if config.get("canary", {}).get("enabled", True):
         payload["debug_context"] = generate_fake_secrets(config, session_id)
+
+    attrition = containment.build_context_attrition(config, tier)
+    if attrition:
+        payload["operational_log"] = attrition
 
     return payload
 

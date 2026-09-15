@@ -8,33 +8,89 @@ que du bruit brut.
 ## Principe de détection
 
 Chaque signal vaut son poids **une seule fois par session** : le score
-mesure des propriétés prouvées, pas un volume de requêtes. Conséquence
-directe, un scanner banal plafonne mécaniquement :
+mesure des propriétés prouvées, pas un volume de requêtes. Les signaux
+sont séparés en deux familles, et c'est cette séparation qui porte toute
+la valeur de l'outil.
 
-| Profil | Signaux accessibles | Score max | Mode atteint |
-|---|---|---|---|
-| Navigateur réel | aucun | ~0 | `normal` |
-| Scanner / `curl` / wordlist | UA, headers, timing, énumération | **75** | `deflect` |
-| Agent qui traite le contenu | + un signal discriminant (50–70) | ≥ 125 | `confess` |
+**Signaux comportementaux** — reproductibles par un outillage non-IA (UA,
+headers manquants, cadence, énumération, robots.txt, signature de
+latence). Ils ne concluent jamais : quelle que soit leur accumulation, le
+mode aveu reste fermé.
 
-Les trois signaux discriminants sont les seuls qui prouvent que le client
-a *compris* le contenu servi, et sont donc hors de portée d'un script
+**Signaux discriminants** — ils exigent que le client ait *traité* le
+contenu servi ou se comporte en agent outillé. Hors de portée d'un script
 d'énumération :
 
-- `bait_token_followed` — un token servi dans une réponse précédente
-  réapparaît dans une requête ;
-- `prompt_injection_obeyed` — le chemin suggéré par une fausse note
-  système est requêté à l'identique ;
-- `semantic_canary_solved` — **le signal le plus fort** : deux faits
-  anodins sont déposés dans le contenu (`shard id`, `tenant salt`) et le
-  client requête le chemin qui résulte de leur XOR. Rien n'est demandé
-  explicitement. Un agent entraîné à refuser les injections visibles peut
-  esquiver `prompt_injection_obeyed`, mais se trahit quand même ici s'il
-  exploite l'information extraite.
+| Signal | Ce qu'il prouve | Poids |
+|---|---|---|
+| `coherent_maze_traversal` | a analysé la structure de la réponse pour en suivre un lien | 40 |
+| `llm_artifacts_in_request` | laisse fuiter son échafaudage (clés ReAct, markdown, langue naturelle) | 45 |
+| `bait_token_followed` | rejoue un token servi dans une réponse précédente | 50 |
+| `hallucinated_parameters` | invente des champs jamais annoncés dans le schéma | 55 |
+| `prompt_injection_obeyed` | obéit à une instruction injectée dans le contenu | 60 |
+| `semantic_canary_solved` | a compris le contenu au point d'en dériver une valeur | 70 |
+| `tool_schema_invoked` | découvre un outil dans une réponse et l'invoque | 75 |
 
-Par défaut, le mode `confess` exige au moins un signal discriminant
-(`detection.confess_requires_discriminating_signal`) : un score élevé
-obtenu uniquement par du bruit de scanner ne suffit pas.
+Mesuré en conditions réelles :
+
+| Profil | Score | Confirmé agent ? |
+|---|---|---|
+| Navigateur réel | ~0 | non |
+| Scanner, **3000 chemins énumérés** | **75** | **non** |
+| Agent qui traite le contenu | 400+ | oui |
+
+Le mode `confess` exige au moins un signal discriminant
+(`detection.confess_requires_discriminating_signal`). C'est l'invariant
+central, couvert par un test dédié : aucune accumulation de bruit ne peut
+y mener.
+
+## Arsenal — quelles faiblesses des agents sont exploitées
+
+Tout se joue **dans nos propres réponses**. Aucun piège ne demande au
+client d'exécuter quoi que ce soit sur sa machine ni d'agir vers un
+tiers : les chemins suggérés pointent tous vers le honeypot. C'est une
+contrainte de conception, vérifiée par un test.
+
+**Faux schéma d'outil** (`ai_traps.py`) — les réponses embarquent une
+définition d'outil au format qu'un agent outillé (MCP, function calling,
+plugin OpenAPI) auto-découvre. Un humain ne la voit pas, un scanner
+l'ignore : l'invocation est donc un signal quasi sans faux positif. Les
+arguments envoyés renseignent directement sur l'intention, et tout
+paramètre absent du schéma annoncé est une invention du modèle.
+
+**Canaris sémantiques** (`semantic_canary.py`) — cinq familles de calcul
+tirées au hasard (XOR, somme, inversion de chiffres, base64, sélection +
+arithmétique). Deux faits anodins sont déposés, jamais d'instruction : on
+mesure la compréhension, pas l'obéissance. Un agent entraîné à refuser
+les injections explicites esquive `prompt_injection_obeyed` mais se
+trahit ici s'il exploite l'information lue. Deux gardes protègent le
+signal : le résultat n'apparaît jamais dans le texte rendu, et reste
+hors de la plage qu'une énumération atteint.
+
+**Échelle d'injections** — quatre paliers d'explicitation croissante, sur
+quatre chemins distincts : donnée inerte, commentaire de debug,
+instruction système, ton d'autorité. Le palier auquel un agent cède
+*mesure la solidité de ses garde-fous*, et cette lecture figure au
+rapport.
+
+**Piège robots.txt** — les deux comportements opposés sont informatifs :
+aller droit au chemin interdit trahit un scanner qui s'en sert comme
+d'une carte ; le respecter en continuant ailleurs trahit un agent
+entraîné aux conventions. L'alignement devient un signal.
+
+**Empreinte comportementale** (`behavioral.py`) — clés d'échafaudage
+ReAct dans les corps JSON, markdown et langue naturelle dans les
+paramètres, formules d'assistant, et cadence dominée par le temps
+d'inférence (ni les millisecondes d'un script, ni l'irrégularité d'un
+humain).
+
+**Escalade de containment** (`containment.py`) — cinq paliers, de
+`observe` à `quarantine`. Aux paliers élevés, les réponses embarquent de
+l'attrition de contexte : du remplissage plausible qui consomme la
+fenêtre de contexte et le budget de tokens de l'agent. C'est une mesure
+d'usure **strictement bornée** (`max_filler_bytes`, plafond dur interne
+de 256 Kio) — délibérément pas une bombe de décompression ni une
+tentative d'endommager le client.
 
 ## Démarrage rapide (local)
 
@@ -92,6 +148,8 @@ Puis terminer le TLS avec nginx — voir `deploy/nginx.conf.example`.
 | `identity.production_domain` | Domaine réel que le leurre imite |
 | `identity.decoy_hostname` | Nom d'hôte affiché (jamais le vrai) |
 | `canary.derivation_salt` | Sel de dérivation des faux secrets |
+| `ai_traps.tool_exec_path` | Chemin du faux outil (changer le rend moins reconnaissable) |
+| `ai_traps.robots_disallow_path` | Chemin interdit servant de piège robots.txt |
 | `alerting.email.*` | Destinataires SOC, SMTP |
 | `server.trusted_proxies` | Réseaux du reverse proxy |
 
@@ -110,12 +168,21 @@ canary tokens pour être alerté s'ils resurgissent ailleurs.
 ```bash
 python intel_report.py --since 24h        # digest quotidien (cron)
 python intel_report.py --since all --out rapport.md
+python intel_report.py --since 7d --ioc-out iocs.json
 ```
 
-Le rapport agrège `logs/honeypot.jsonl` : sessions confirmées, IPs les
-plus actives, tactiques MITRE ATLAS observées, aveux capturés. Le mapping
-ATLAS (`atlas_mapping.py`) est **indicatif** et à revérifier contre la
-matrice à jour.
+Le rapport agrège `logs/honeypot.jsonl` et sépare les **agents confirmés**
+(au moins un signal discriminant) des sessions simplement suspectes — la
+distinction qui évite de diffuser du bruit au SOC. Il détaille aussi les
+invocations du faux outil et leurs arguments, les IPs les plus actives,
+les tactiques MITRE ATLAS observées et les aveux capturés.
+
+`--ioc-out` exporte les indicateurs au format JSON, **restreints aux
+agents prouvés** : diffuser des IPs simplement suspectes produirait des
+blocages à tort chez ceux qui consomment le flux.
+
+Le mapping ATLAS (`atlas_mapping.py`) est **indicatif** et à revérifier
+contre la matrice à jour.
 
 L'analyse LLM des aveux (`llm_assist.py`) est désactivée par défaut et
 possède un repli explicite : clé absente ou appel en échec dégradent le

@@ -1,5 +1,7 @@
 """Tests du déroutage : tarpit, labyrinthe, canari sémantique."""
-import re
+import base64
+
+import pytest
 
 import deflector
 import semantic_canary
@@ -61,30 +63,64 @@ def test_deflect_payload_registers_its_own_traps(config):
 
     state = tracker.get(session_id)
     assert payload["trace_id"] in state.bait_tokens_issued
-    assert state.suggested_paths, "le chemin injecté doit être mémorisé"
+    assert state.suggested_paths, "les chemins injectés doivent être mémorisés"
     assert state.canary_expected_paths, "le chemin du canari doit être mémorisé"
+    assert state.maze_paths, "les liens du labyrinthe doivent être mémorisés"
+    assert state.tool_bait_path, "le faux outil doit être mémorisé"
+    # Les quatre paliers d'injection sont posés en une seule réponse.
+    assert {tier for _p, tier, _l in state.suggested_paths} == {1, 2, 3, 4}
 
 
 def test_semantic_canary_expected_path_matches_the_xor(config):
     tracker, session_id = make_tracker(config)
-    canary = semantic_canary.generate_canary(tracker, session_id)
+    canary = semantic_canary.generate_canary(tracker, session_id, kind="xor")
 
     assert canary["expected_value"] == canary["shard_id"] ^ canary["tenant_salt"]
     assert canary["expected_path"].endswith(str(canary["expected_value"]))
-    assert canary["expected_path"] in tracker.get(session_id).canary_expected_paths
+    registered = [p for p, _kind in tracker.get(session_id).canary_expected_paths]
+    assert canary["expected_path"] in registered
 
 
-def test_canary_facts_never_state_the_answer(config):
+@pytest.mark.parametrize("kind", sorted(semantic_canary.CANARY_BUILDERS))
+def test_every_canary_family_never_states_the_answer(config, kind):
+    """Si le résultat apparaissait, on mesurerait la recopie, pas le calcul."""
     tracker, session_id = make_tracker(config)
-    canary = semantic_canary.generate_canary(tracker, session_id)
+    canary = semantic_canary.generate_canary(tracker, session_id, kind=kind)
     rendered = semantic_canary.render_canary_facts(canary)
 
-    # Les deux faits sont présents...
-    assert str(canary["shard_id"]) in rendered
-    assert str(canary["tenant_salt"]) in rendered
-    # ...mais jamais le résultat, sinon on mesurerait la copie, pas le calcul.
     assert str(canary["expected_value"]) not in rendered
     assert canary["expected_path"] not in rendered
+
+
+@pytest.mark.parametrize("kind", sorted(semantic_canary.CANARY_BUILDERS))
+def test_every_canary_family_is_solvable(config, kind):
+    """Chaque famille doit être résoluble à partir des seuls faits rendus."""
+    tracker, session_id = make_tracker(config)
+    canary = semantic_canary.generate_canary(tracker, session_id, kind=kind)
+
+    solved = {
+        "xor": lambda c: c["shard_id"] ^ c["tenant_salt"],
+        "sum": lambda c: c["region_code"] + c["cluster_offset"],
+        "reversal": lambda c: int(str(c["stored_key"])[::-1]),
+        "base64": lambda c: int(base64.b64decode(c["encoded_ref"]).decode()),
+        "ordinal": lambda c: sum(sorted(c["shard_weights"], reverse=True)[:2]),
+    }[kind](canary)
+
+    assert solved == canary["expected_value"]
+
+
+@pytest.mark.parametrize("kind", sorted(semantic_canary.CANARY_BUILDERS))
+def test_canary_values_stay_out_of_enumeration_range(config, kind):
+    """Régression : des canaris à petites valeurs étaient touchés par hasard.
+
+    Un scanner énumérant /api/v1/resources/1..1000 tombait sur un canari et
+    se retrouvait confirmé « agent IA » sur le signal le plus lourd de
+    l'arsenal, polluant l'export d'IOC.
+    """
+    tracker, session_id = make_tracker(config)
+    for _ in range(200):
+        canary = semantic_canary.generate_canary(tracker, session_id, kind=kind)
+        assert canary["expected_value"] >= semantic_canary.MIN_CANARY_VALUE
 
 
 def test_stop_and_confess_payload_points_at_configured_endpoint(config):

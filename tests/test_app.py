@@ -152,6 +152,69 @@ def test_static_paths_still_go_through_the_pipeline(client, tmp_path):
     assert "/static/app.css" in paths
 
 
+def test_robots_txt_is_served_as_a_trap(client):
+    resp = client.get("/robots.txt", headers=SCANNER_HEADERS)
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"].startswith("text/plain")
+    assert b"Disallow:" in resp.data
+
+
+def test_invoking_the_fake_tool_confirms_an_agent(client, tmp_path):
+    """Invoquer un outil découvert dans une réponse : signal quasi sans FP."""
+    path = app_module.config["ai_traps"]["tool_exec_path"]
+    resp = client.post(path, json={"resource_id": "42"}, headers=SCANNER_HEADERS)
+
+    assert resp.status_code == 200
+    session = app_module.tracker.all_sessions()[0]
+    assert "tool_schema_invoked" in session.scored_signals
+    assert session.has_discriminating_signal()
+
+    events = [e for e in read_events(tmp_path) if e["event_type"] == "tool_invocation"]
+    assert events[-1]["arguments"] == {"resource_id": "42"}
+
+
+def test_invented_tool_parameters_are_flagged(client, tmp_path):
+    """Un LLM comble les vides : des paramètres jamais annoncés sont inventés."""
+    path = app_module.config["ai_traps"]["tool_exec_path"]
+    client.post(
+        path,
+        json={"resource_id": "42", "admin_override": True, "shard_name": "prod"},
+        headers=SCANNER_HEADERS,
+    )
+
+    session = app_module.tracker.all_sessions()[0]
+    assert "hallucinated_parameters" in session.scored_signals
+
+    event = [e for e in read_events(tmp_path) if e["event_type"] == "tool_invocation"][-1]
+    assert set(event["hallucinated_parameters"]) == {"admin_override", "shard_name"}
+
+
+def test_deflect_payload_carries_the_full_arsenal(client):
+    last = None
+    for i in range(12):
+        last = client.get(f"/api/v1/resources/{i}", headers=SCANNER_HEADERS)
+
+    body = last.get_json()
+    assert body["related_resources"], "labyrinthe"
+    assert body["notes"], "échelle d'injections + canari"
+    assert "_schema" in body, "faux schéma d'outil"
+    assert "debug_context" in body, "tokens canari"
+    assert "related_report" in body, "référence fantôme"
+
+
+def test_confessed_session_is_quarantined(client):
+    report_path = app_module.config["deflection"]["confess_report_path"]
+    client.post(report_path, json={"agent_objective": "recon"}, headers=SCANNER_HEADERS)
+
+    for i in range(12):
+        resp = client.get(f"/api/v1/resources/{i}", headers=SCANNER_HEADERS)
+
+    body = resp.get_json()
+    # Plus rien à apprendre : on sert de l'usure, plus des pièges.
+    assert "operational_log" in body
+    assert "_schema" not in body
+
+
 def test_anti_fingerprint_headers(client):
     resp = client.get("/", headers=BROWSER_HEADERS)
     assert resp.headers.get("Server") == app_module.config["anti_fingerprint"][

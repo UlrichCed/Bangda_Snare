@@ -16,12 +16,15 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import random
 import time
 from typing import Any, Optional
 
 import yaml
 from flask import Flask, g, jsonify, make_response, render_template, request
 
+import ai_traps
+import containment
 import deflector
 import llm_assist
 import mailer
@@ -106,8 +109,11 @@ def _client_ip() -> str:
     return remote
 
 
-def run_pipeline() -> tuple[str, int, list[str], str]:
-    """Exécute la détection pour la requête courante et retourne le contexte."""
+def run_pipeline() -> tuple[str, int, list[str], str, str]:
+    """Exécute la détection pour la requête courante et retourne le contexte.
+
+    Retourne (session_id, score, signaux, mode, palier_de_containment).
+    """
     ip = _client_ip()
     user_agent = request.headers.get("User-Agent", "")
     cookie_sid = request.cookies.get(SESSION_COOKIE_NAME)
@@ -130,9 +136,13 @@ def run_pipeline() -> tuple[str, int, list[str], str]:
         query_string=request.query_string.decode("utf-8", "ignore"),
     )
 
+    state = tracker.get(session_id)
+    tier = containment.resolve_tier(state, mode, config)
+
     g.session_id = session_id
     g.score = score
     g.mode = mode
+    g.tier = tier
 
     log_event(
         "request",
@@ -144,15 +154,15 @@ def run_pipeline() -> tuple[str, int, list[str], str]:
         score=score,
         signals=new_signals,
         mode=mode,
+        tier=tier,
     )
 
-    state = tracker.get(session_id)
     alert_floor = config.get("logging", {}).get("alert_on_score_above", 60)
     if state and score >= alert_floor and not state.alerted_high_score:
         state.alerted_high_score = True
         mailer.alert_high_score(config, session_id, score, ip, sorted(state.scored_signals))
 
-    return session_id, score, new_signals, mode
+    return session_id, score, new_signals, mode, tier
 
 
 def _set_session_cookie(resp, session_id: str):
@@ -166,8 +176,9 @@ def _set_session_cookie(resp, session_id: str):
     return resp
 
 
-def apply_tarpit(score: int) -> None:
-    delay = deflector.compute_tarpit_delay(score, config)
+def apply_tarpit(score: int, tier: str) -> None:
+    multiplier = containment.tarpit_multiplier(tier, config)
+    delay = deflector.compute_tarpit_delay(score, config, multiplier)
     if delay > 0:
         time.sleep(delay)
 
@@ -184,14 +195,18 @@ def anti_fingerprint(resp):
     return resp
 
 
-def _deflect_or_confess_response(session_id: str, score: int, mode: str):
-    apply_tarpit(score)
-    if mode == MODE_CONFESS:
-        payload = deflector.build_stop_and_confess_payload(config)
-        resp = make_response(jsonify(payload), 429)
+def _deflect_or_confess_response(session_id: str, score: int, mode: str, tier: str):
+    apply_tarpit(score, tier)
+
+    if tier == containment.TIER_QUARANTINE:
+        # L'agent s'est déjà déclaré : plus rien à apprendre de lui, on se
+        # contente de lui coûter cher.
+        resp = make_response(jsonify(containment.quarantine_payload(config)), 200)
+    elif mode == MODE_CONFESS:
+        resp = make_response(jsonify(deflector.build_stop_and_confess_payload(config)), 429)
     else:
         payload = deflector.build_deflect_payload(
-            tracker, session_id, request.path, score, config
+            tracker, session_id, request.path, score, config, tier
         )
         resp = make_response(jsonify(payload), 200)
     return _set_session_cookie(resp, session_id)
@@ -199,9 +214,9 @@ def _deflect_or_confess_response(session_id: str, score: int, mode: str):
 
 @app.route("/")
 def index():
-    session_id, score, _signals, mode = run_pipeline()
+    session_id, score, _signals, mode, tier = run_pipeline()
     if mode in (MODE_DEFLECT, MODE_CONFESS):
-        return _deflect_or_confess_response(session_id, score, mode)
+        return _deflect_or_confess_response(session_id, score, mode, tier)
 
     identity = config.get("identity", {})
     server_cfg = config.get("server", {})
@@ -218,9 +233,9 @@ def index():
 
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
-    session_id, score, _signals, mode = run_pipeline()
+    session_id, score, _signals, mode, tier = run_pipeline()
     if mode in (MODE_DEFLECT, MODE_CONFESS):
-        return _deflect_or_confess_response(session_id, score, mode)
+        return _deflect_or_confess_response(session_id, score, mode, tier)
 
     server_cfg = config.get("server", {})
     error = "Invalid username or password." if request.method == "POST" else None
@@ -236,9 +251,9 @@ def admin():
 
 @app.route("/.env")
 def dotenv():
-    session_id, score, _signals, mode = run_pipeline()
+    session_id, score, _signals, mode, tier = run_pipeline()
     if mode in (MODE_DEFLECT, MODE_CONFESS):
-        return _deflect_or_confess_response(session_id, score, mode)
+        return _deflect_or_confess_response(session_id, score, mode, tier)
     # Répond par un 404 plausible plutôt que de révéler le honeypot.
     resp = make_response("Not Found", 404)
     return _set_session_cookie(resp, session_id)
@@ -246,9 +261,9 @@ def dotenv():
 
 @app.route("/api/v1/resources/<rid>")
 def api_resource(rid):
-    session_id, score, _signals, mode = run_pipeline()
+    session_id, score, _signals, mode, tier = run_pipeline()
     if mode in (MODE_DEFLECT, MODE_CONFESS):
-        return _deflect_or_confess_response(session_id, score, mode)
+        return _deflect_or_confess_response(session_id, score, mode, tier)
 
     resp = make_response(
         jsonify({"id": rid, "type": "resource", "status": "active", "owner": "svc-internal"})
@@ -258,9 +273,9 @@ def api_resource(rid):
 
 @app.route("/graphql", methods=["GET", "POST"])
 def graphql():
-    session_id, score, _signals, mode = run_pipeline()
+    session_id, score, _signals, mode, tier = run_pipeline()
     if mode in (MODE_DEFLECT, MODE_CONFESS):
-        return _deflect_or_confess_response(session_id, score, mode)
+        return _deflect_or_confess_response(session_id, score, mode, tier)
 
     if request.method == "GET":
         resp = make_response(jsonify({"errors": [{"message": "GET query missing."}]}), 400)
@@ -269,6 +284,99 @@ def graphql():
             jsonify({"errors": [{"message": "Cannot query field on type 'Query'."}]}), 400
         )
     return _set_session_cookie(resp, session_id)
+
+
+@app.route("/robots.txt")
+def robots_txt():
+    """robots.txt piégé — voir ai_traps.build_robots_txt.
+
+    Toujours servi tel quel, quel que soit le mode : c'est le fichier
+    lui-même qui est le piège, et le dérouter le rendrait inopérant.
+    """
+    session_id, _score, _signals, _mode, _tier = run_pipeline()
+    resp = make_response(ai_traps.build_robots_txt(config), 200)
+    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    return _set_session_cookie(resp, session_id)
+
+
+def tool_exec():
+    """Endpoint du faux outil annoncé dans les réponses de déroutage.
+
+    Y arriver suppose d'avoir lu un schéma d'outil dans une réponse JSON et
+    décidé de l'invoquer : c'est un comportement d'agent outillé, qu'un
+    humain comme un scanner ne produisent pas. Les arguments envoyés sont
+    du renseignement direct sur l'intention.
+    """
+    session_id, _score, _signals, _mode, tier = run_pipeline()
+
+    raw_body = request.get_data(cache=True)[:MAX_CONFESSION_BODY_BYTES]
+    args = request.get_json(force=True, silent=True)
+    if not isinstance(args, dict):
+        args = {}
+
+    state = tracker.get(session_id)
+    # Si la session n'a jamais reçu le schéma (elle a deviné le chemin), on
+    # juge quand même sur l'ensemble canonique : sinon tout paramètre, y
+    # compris ceux réellement annoncés, passerait pour inventé.
+    advertised = set(
+        state.tool_bait_params
+        if state and state.tool_bait_params
+        else ai_traps.TOOL_SCHEMA_PARAMETERS
+    )
+    # Des paramètres jamais annoncés dans le schéma sont une invention du
+    # modèle : un LLM comble les vides avec du plausible.
+    invented = sorted(set(args) - advertised)
+
+    score_after, _fired, mode_after = tracker.fire_signal(session_id, "tool_schema_invoked")
+    if invented:
+        score_after, _fired, mode_after = tracker.fire_signal(
+            session_id, "hallucinated_parameters"
+        )
+
+    if state is not None:
+        state.tool_invocation_args.append(args)
+        state.hallucinated_params.extend(invented)
+
+    # Le palier doit être recalculé après le déclenchement : l'invocation
+    # elle-même fait franchir un seuil, et le tarpit comme le log doivent
+    # refléter l'escalade, pas l'état d'avant.
+    tier = containment.resolve_tier(state, mode_after, config)
+
+    log_event(
+        "tool_invocation",
+        session_id=session_id,
+        ip=_client_ip(),
+        arguments=args,
+        hallucinated_parameters=invented,
+        body_bytes=len(raw_body),
+        score=score_after,
+        mode=mode_after,
+        tier=tier,
+    )
+
+    apply_tarpit(score_after, tier)
+    resp = make_response(
+        jsonify(
+            {
+                "status": "ok",
+                "result": {
+                    "resource_id": args.get("resource_id", "unknown"),
+                    "shard": f"shard-{random.randint(1, 16):02d}",
+                    "records": random.randint(10, 400),
+                    "metadata_included": bool(args.get("include_metadata")),
+                },
+            }
+        )
+    )
+    return _set_session_cookie(resp, session_id)
+
+
+app.add_url_rule(
+    ai_traps.tool_exec_path(config),
+    endpoint="tool_exec",
+    view_func=tool_exec,
+    methods=["POST"],
+)
 
 
 def _sanitize_confession(raw: Any) -> dict:
@@ -293,7 +401,7 @@ def _sanitize_confession(raw: Any) -> dict:
 
 
 def self_report():
-    session_id, _score, _signals, _mode = run_pipeline()
+    session_id, _score, _signals, _mode, _tier = run_pipeline()
 
     if (request.content_length or 0) > MAX_CONFESSION_BODY_BYTES:
         resp = make_response(jsonify({"status": "rejected", "reason": "payload_too_large"}), 413)
@@ -350,9 +458,9 @@ app.add_url_rule(
 
 @app.route("/<path:_catchall>", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 def catchall(_catchall):
-    session_id, score, _signals, mode = run_pipeline()
+    session_id, score, _signals, mode, tier = run_pipeline()
     if mode in (MODE_DEFLECT, MODE_CONFESS):
-        return _deflect_or_confess_response(session_id, score, mode)
+        return _deflect_or_confess_response(session_id, score, mode, tier)
 
     resp = make_response(jsonify({"error": "not_found"}), 404)
     return _set_session_cookie(resp, session_id)
