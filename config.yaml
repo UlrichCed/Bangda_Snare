@@ -1,6 +1,6 @@
 # Configuration centralisée du honeypot HTTP/API anti-attaques-IA.
 # Renseigner identity.production_domain et identity.decoy_hostname avant tout
-# déploiement réel — ne jamais laisser ces valeurs génériques en production.
+# déploiement réel : ne jamais laisser ces valeurs génériques en production.
 
 server:
   host: "0.0.0.0"
@@ -12,6 +12,10 @@ server:
   # n'importe qui peut forger l'en-tête et fausser l'attribution d'IP.
   # Exemple derrière un nginx local : ["127.0.0.1/32", "::1/128"]
   trusted_proxies: []
+  # Plafond du corps des requêtes. Sans lui, Flask bufferise en mémoire
+  # tout ce que le client annonce : un POST de 64 Mo passait, et un
+  # millier de connexions concurrentes suffisait à épuiser la mémoire.
+  max_request_body_bytes: 65536
 
 identity:
   # À remplacer par le vrai domaine de production que ce honeypot imite.
@@ -22,9 +26,16 @@ identity:
 
 # Éviction du registre de sessions en mémoire : sans plafond, scanner le
 # honeypot suffirait à le faire gonfler indéfiniment.
+#
+# Dimensionnement (mesuré) : une session coûte ~10 Ko à l'ouverture, ~20 Ko
+# après 10 requêtes, et plafonne à ~55 Ko une fois saturée. max_tracked est
+# donc un plafond mémoire déguisé :
+#     1 000 sessions -> ~60 Mo      5 000 -> ~275 Mo      10 000 -> ~545 Mo
+# S'y ajoute le registre de corrélation, plafonné séparément (~7 Mo).
+# Relever max_tracked en connaissance de la RAM de la machine cible.
 sessions:
   ttl_seconds: 3600
-  max_tracked: 10000
+  max_tracked: 5000
   eviction_interval_seconds: 60
 
 detection:
@@ -61,6 +72,9 @@ detection:
     semantic_canary_solved: 70
     # Invoquer un outil découvert dans une réponse : quasi sans faux positif.
     tool_schema_invoked: 75
+    # Rejeu d'un piège servi à une autre session : la valeur était
+    # imprévisible, la corrélation est donc quasi certaine.
+    cross_session_trap_reuse: 80
   known_agent_ua_patterns:
     - "langchain"
     - "autogpt"
@@ -107,6 +121,16 @@ ai_traps:
   # découvre et l'invoque ; un humain ne le voit pas, un scanner l'ignore.
   tool_schema_bait_enabled: true
   tool_exec_path: "/api/v1/internal/tool-exec"
+  # Chemins de pièges dérivés par session. Un chemin global finirait par
+  # circuler entre attaquants comme n'importe quel IOC : il suffirait de
+  # l'éviter pour esquiver le piège, ou de le requêter pour reconnaître un
+  # honeypot. À personnaliser.
+  # Le canari est assez discret pour être posé dès la première réponse,
+  # avant tout déroutage. Sans cela, un adversaire qui change d'identité à
+  # chaque requête ne reçoit jamais de piège et ne laisse aucune prise.
+  plant_canary_in_normal_responses: true
+  randomize_trap_paths: true
+  path_salt: "change-me-honeypot-paths-v1"
   # robots.txt piégé : le respecter comme l'exploiter sont informatifs.
   robots_trap_enabled: true
   robots_disallow_path: "/api/v1/internal/archive"
@@ -114,6 +138,25 @@ ai_traps:
   # langue naturelle dans les paramètres, formules d'assistant).
   llm_artifact_detection: true
   latency_signature_enabled: true
+
+# Dévoilement progressif des pièges. Une réponse contenant d'un coup faux
+# secrets, schéma d'outil, quatre injections et un canari ne ressemble à
+# aucune API réelle : un agent prudent y reconnaît un leurre et s'en va.
+# On n'en pose donc qu'un à la fois, selon ce que le client a démontré.
+trap_director:
+  enabled: true
+  # Au-delà de ce nombre de réponses appâtées sans réaction, on cesse de
+  # dépenser des pièges : ils seraient brûlés pour rien.
+  give_up_after_unengaged_responses: 6
+  # Nombre de chemins dont le piège choisi reste mémorisé, pour qu'une
+  # ressource redemandée reproduise la même réponse. Premier poste mémoire
+  # d'une session : compter ~170 octets par chemin mémorisé.
+  memo_max_paths: 64
+
+# Corrélation de campagne : suivre un adversaire qui change d'identité.
+correlation:
+  enabled: true
+  trap_registry_max_entries: 50000
 
 # Escalade du confinement. L'attrition de contexte sert du remplissage
 # plausible pour consommer la fenêtre de contexte et le budget de tokens
@@ -167,6 +210,12 @@ llm_assist:
 
 anti_fingerprint:
   enabled: true
+  # ATTENTION : gunicorn réécrit lui-même l'en-tête Server après le passage
+  # de l'application, donc cette valeur n'a AUCUN effet sous gunicorn seul
+  # (elle ne s'applique qu'au serveur de développement). En production,
+  # c'est nginx qui masque l'en-tête amont et pose le sien : d'où
+  # l'obligation du reverse proxy, qui n'est pas qu'une question de TLS.
+  # Vérifier après déploiement : curl -sD- -o /dev/null https://.../ | grep -i server
   fake_server_header: "nginx"
   remove_headers:
     - "X-Powered-By"

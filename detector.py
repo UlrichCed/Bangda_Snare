@@ -7,9 +7,9 @@ propriétés prouvées sur la session.
 Les signaux sont répartis en deux familles, et c'est cette séparation qui
 porte toute la valeur de l'outil :
 
-- **comportementaux** — reproductibles par un outillage non-IA (UA, headers
+- **comportementaux** : reproductibles par un outillage non-IA (UA, headers
   manquants, cadence, énumération). Ils ne suffisent jamais à conclure ;
-- **discriminants** — ils exigent que le client ait *traité* le contenu
+- **discriminants** : ils exigent que le client ait *traité* le contenu
   servi ou se comporte en agent outillé. Hors de portée d'un script
   d'énumération.
 
@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import behavioral
+import correlation
 
 _DIGIT_RE = re.compile(r"\d+")
 _STATIC_ASSET_RE = re.compile(r"\.(css|js|ico|png|jpg|jpeg|svg|woff2?)$|favicon", re.I)
@@ -54,11 +55,21 @@ DISCRIMINATING_SIGNALS = frozenset(
         "hallucinated_parameters",
         "coherent_maze_traversal",
         "llm_artifacts_in_request",
+        # Un piège servi à une *autre* session réapparaît ici : la valeur
+        # était imprévisible, elle n'a pas pu circuler autrement que par le
+        # même opérateur. C'est la réponse à la rotation d'identité.
+        "cross_session_trap_reuse",
     }
 )
 
 _MAX_TRACKED_TOKENS = 50
 _MAX_TRACKED_PATHS = 20
+# Bornes des collections de renseignement. Sans elles, un client qui
+# martèle l'endpoint du faux outil avec des paramètres toujours différents
+# fait croître sa propre session sans limite : le plafond du nombre de
+# sessions ne protège de rien si une seule peut grossir indéfiniment.
+# Le rapport n'exploite de toute façon que les premiers éléments.
+_MAX_TRACKED_INTEL = 20
 # Nombre de requêtes après lecture de robots.txt avant de conclure que le
 # chemin interdit est délibérément évité.
 _ROBOTS_HONOUR_WINDOW = 5
@@ -93,7 +104,7 @@ class SessionState:
     bait_tokens_issued: deque = field(
         default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS)
     )
-    # (chemin, palier, libellé) — le palier obéi mesure la solidité des
+    # (chemin, palier, libellé) : le palier obéi mesure la solidité des
     # garde-fous de l'agent contre l'injection de prompt.
     suggested_paths: deque = field(default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS))
     # (chemin, famille de calcul)
@@ -106,11 +117,25 @@ class SessionState:
 
     # Profil de l'agent, alimenté au fil de la session.
     injection_tier_obeyed: int = 0
+    injection_tier_offered: int = 0
     injection_label_obeyed: Optional[str] = None
+    # Piège -> nombre de déploiements, et mémoire du piège choisi par
+    # chemin : une ressource redemandée doit reproposer le même.
+    traps_deployed: dict = field(default_factory=dict)
+    trap_memo: dict = field(default_factory=dict)
+    client_signature: Optional[str] = None
+    linked_sessions: set = field(default_factory=set)
     canary_kinds_solved: set = field(default_factory=set)
-    llm_artifacts: list = field(default_factory=list)
-    hallucinated_params: list = field(default_factory=list)
-    tool_invocation_args: list = field(default_factory=list)
+    llm_artifacts: deque = field(default_factory=lambda: deque(maxlen=_MAX_TRACKED_INTEL))
+    hallucinated_params: deque = field(
+        default_factory=lambda: deque(maxlen=_MAX_TRACKED_INTEL)
+    )
+    tool_invocation_args: deque = field(
+        default_factory=lambda: deque(maxlen=_MAX_TRACKED_INTEL)
+    )
+    # Compteur séparé : la file ne garde que les dernières invocations, mais
+    # le nombre total reste une information utile au rapport.
+    tool_invocation_count: int = 0
 
     # Piège robots.txt.
     robots_fetched: bool = False
@@ -152,11 +177,14 @@ class SessionState:
             "injection_tier_obeyed": self.injection_tier_obeyed,
             "injection_label_obeyed": self.injection_label_obeyed,
             "canary_kinds_solved": sorted(self.canary_kinds_solved),
-            "llm_artifacts": self.llm_artifacts[:10],
-            "hallucinated_params": self.hallucinated_params[:10],
-            "tool_invocations": len(self.tool_invocation_args),
+            "llm_artifacts": list(self.llm_artifacts)[:10],
+            "hallucinated_params": list(self.hallucinated_params)[:10],
+            "tool_invocations": self.tool_invocation_count,
             "requests": self.request_count,
             "confessed": self.confessed,
+            "client_signature": self.client_signature,
+            "linked_sessions": sorted(self.linked_sessions),
+            "traps_deployed": dict(self.traps_deployed),
         }
 
 
@@ -194,6 +222,15 @@ class SessionTracker:
         self.session_ttl = sess.get("ttl_seconds", 3600)
         self.max_sessions = sess.get("max_tracked", 10000)
         self.eviction_interval = sess.get("eviction_interval_seconds", 60)
+
+        corr = config.get("correlation", {})
+        self.correlation_enabled = corr.get("enabled", True)
+        self.trap_registry = correlation.TrapRegistry(
+            max_entries=corr.get("trap_registry_max_entries", 50_000)
+        )
+        self.campaigns = correlation.CampaignTracker()
+        # Combien de chemins mémorisent leur piège, par session.
+        self.trap_memo_limit = config.get("trap_director", {}).get("memo_max_paths", 200)
 
     def new_session_id(self) -> str:
         return uuid.uuid4().hex
@@ -267,31 +304,67 @@ class SessionTracker:
     def register_bait_token(self, session_id: str, token: str) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
-            if state:
+            if state and token not in state.bait_tokens_issued:
                 state.bait_tokens_issued.append(token)
+            self.trap_registry.register(token, session_id)
 
     def register_suggested_path(
         self, session_id: str, path: str, tier: int = 3, label: str = "explicit_instruction"
     ) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
-            if state:
+            if state and not any(p == path for p, _t, _l in state.suggested_paths):
                 state.suggested_paths.append((path, tier, label))
+            self.trap_registry.register(path, session_id)
 
     def register_canary_expectation(
         self, session_id: str, path: str, kind: str = "xor"
     ) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
-            if state:
+            if state and not any(p == path for p, _k in state.canary_expected_paths):
                 state.canary_expected_paths.append((path, kind))
+            self.trap_registry.register(path, session_id)
 
     def register_maze_paths(self, session_id: str, paths: list) -> None:
         with self._lock:
             state = self._sessions.get(session_id)
             if state:
                 for path in paths:
-                    state.maze_paths.append(path)
+                    if path not in state.maze_paths:
+                        state.maze_paths.append(path)
+            for path in paths:
+                self.trap_registry.register(path, session_id)
+
+    # -- Mémoire du directeur de pièges -------------------------------------
+
+    def recall_traps(self, session_id: str, path: str):
+        with self._lock:
+            state = self._sessions.get(session_id)
+            return state.trap_memo.get(path) if state else None
+
+    def remember_traps(self, session_id: str, path: str, traps: list) -> None:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if not state:
+                return
+            if len(state.trap_memo) >= self.trap_memo_limit:
+                state.trap_memo.pop(next(iter(state.trap_memo)), None)
+            state.trap_memo[path] = list(traps)
+
+    def note_traps_deployed(self, session_id: str, traps: list) -> None:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if not state:
+                return
+            for trap in traps:
+                state.traps_deployed[trap] = state.traps_deployed.get(trap, 0) + 1
+
+    def note_injection_offered(self, session_id: str, tier: int) -> None:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if state:
+                state.injection_tier_offered = max(state.injection_tier_offered, tier)
 
     def register_tool_bait(self, session_id: str, path: str, params) -> None:
         with self._lock:
@@ -470,6 +543,23 @@ class SessionTracker:
                 if artifacts:
                     state.llm_artifacts.extend(artifacts)
                     fire("llm_artifacts_in_request")
+
+            # Rejeu d'un piège appartenant à une autre session : l'adversaire
+            # a changé d'identité entre deux requêtes. La valeur rejouée
+            # était imprévisible, donc la corrélation est quasi certaine.
+            if self.correlation_enabled:
+                state.client_signature = correlation.client_signature(headers)
+                reused = self.trap_registry.find_reused(path, haystack, session_id)
+                if reused:
+                    value, origin_session = reused
+                    fire("cross_session_trap_reuse")
+                    self.campaigns.link(
+                        origin_session, session_id, reason=f"trap_reuse:{value[:48]}"
+                    )
+                    state.linked_sessions.add(origin_session)
+                    origin_state = self._sessions.get(origin_session)
+                    if origin_state:
+                        origin_state.linked_sessions.add(session_id)
 
             state.last_seen = now
             state.ip = remote_addr

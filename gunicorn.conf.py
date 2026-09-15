@@ -18,7 +18,7 @@ worker_class = "gevent"
 
 # UN SEUL worker, volontairement. L'état des sessions vit dans la mémoire du
 # process : avec plusieurs workers, les requêtes d'une même session sont
-# réparties entre processus et chacun n'en voit qu'une fraction — le score
+# réparties entre processus et chacun n'en voit qu'une fraction : le score
 # se fragmente et les seuils ne sont jamais atteints. La concurrence vient
 # ici de gevent (worker_connections), pas du nombre de workers.
 # Pour passer à plusieurs workers (ou plusieurs machines), il faudrait

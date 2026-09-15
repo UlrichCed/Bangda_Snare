@@ -3,7 +3,7 @@
 Le mot de passe SMTP n'est jamais présent en config : il est lu depuis la
 variable d'environnement nommée par `alerting.email.smtp_password_env_var`
 au moment de l'envoi. Toute erreur (SMTP non configuré, échec réseau,
-identifiants absents) est loguée et avalée — un honeypot ne doit jamais
+identifiants absents) est loguée et avalée : un honeypot ne doit jamais
 planter à cause de son système d'alerte.
 """
 from __future__ import annotations
@@ -73,7 +73,7 @@ def alert_high_score(config: dict, session_id: str, score: int, ip: str, signals
     min_score = email_cfg.get("min_score_for_email", 60)
     if score < min_score:
         return False
-    subject = f"[Honeypot] Score de suspicion élevé ({score}) — session {session_id[:8]}"
+    subject = f"[Honeypot] Score de suspicion élevé ({score}) : session {session_id[:8]}"
     body = (
         f"Session: {session_id}\n"
         f"IP: {ip}\n"
@@ -87,7 +87,7 @@ def alert_confession(config: dict, session_id: str, ip: str, confession: dict) -
     email_cfg = config.get("alerting", {}).get("email", {})
     if not email_cfg.get("send_on_confession", True):
         return False
-    subject = f"[Honeypot] Auto-dénonciation capturée — session {session_id[:8]}"
+    subject = f"[Honeypot] Auto-dénonciation capturée : session {session_id[:8]}"
     body = (
         f"Session: {session_id}\n"
         f"IP: {ip}\n"

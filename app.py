@@ -1,4 +1,4 @@
-"""Honeypot HTTP/API anti-attaques-IA — routes Flask et orchestration.
+"""Honeypot HTTP/API anti-attaques-IA : routes Flask et orchestration.
 
 Toute requête entrante passe par le même pipeline : identification de
 session -> scoring (`detector.py`) -> décision normal/déroutage/aveu ->
@@ -8,7 +8,7 @@ génération de la réponse adaptée (`deflector.py`) -> log structuré
 Le serveur de développement (`app.run`) ne doit jamais être exposé tel
 quel : utiliser `gunicorn -c gunicorn.conf.py app:app` derrière nginx
 (TLS), isolé de toute infrastructure réelle. Le tarpit s'appuie sur des
-workers **gevent** — avec des workers sync, chaque client ralenti bloque
+workers **gevent** : avec des workers sync, chaque client ralenti bloque
 un worker entier et le honeypot se laisse saturer par son propre tarpit.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ import json
 import logging
 import random
 import time
+from http import HTTPStatus
 from typing import Any, Optional
 
 import yaml
@@ -28,6 +29,7 @@ import containment
 import deflector
 import llm_assist
 import mailer
+import semantic_canary
 from detector import MODE_CONFESS, MODE_DEFLECT, SessionTracker
 from logger_setup import log_event, setup_logging
 
@@ -61,17 +63,72 @@ def _load_trusted_proxies(config: dict) -> list:
     return nets
 
 
+def _warn_on_default_salts(config: dict) -> None:
+    """Alerte si les sels de dérivation sont restés aux valeurs livrées.
+
+    Les chemins de pièges et les faux secrets en dérivent. Laissés par
+    défaut, ils sont identiques sur toute installation de ce honeypot :
+    quiconque dispose du dépôt peut les recalculer, donc reconnaître le
+    leurre ou éviter les pièges. C'est une faiblesse silencieuse, d'où
+    l'avertissement au démarrage.
+    """
+    defaults = {
+        "ai_traps.path_salt": config.get("ai_traps", {}).get("path_salt", ""),
+        "canary.derivation_salt": config.get("canary", {}).get("derivation_salt", ""),
+    }
+    unchanged = [key for key, value in defaults.items() if str(value).startswith("change-me")]
+    if unchanged:
+        logger.warning(
+            "Sels de dérivation laissés par défaut (%s) : les chemins de pièges "
+            "sont calculables par quiconque possède ce dépôt. À changer avant "
+            "toute exposition réelle.",
+            ", ".join(unchanged),
+        )
+
+
 config = load_config()
 setup_logging(config)
+_warn_on_default_salts(config)
 tracker = SessionTracker(config)
 TRUSTED_PROXIES = _load_trusted_proxies(config)
 
 # static_folder=None : sans cela, Flask monte sa propre route /static/<path>
-# qui court-circuite entièrement le pipeline de détection — tout ce qu'un
+# qui court-circuite entièrement le pipeline de détection : tout ce qu'un
 # agent sonde sous /static/ serait ni scoré ni logué, et le comportement
 # distinctif de ce handler trahit Flask. Le honeypot ne sert aucun fichier
 # statique réel (les gabarits embarquent leur CSS).
 app = Flask(__name__, static_folder=None)
+
+# Sans plafond, Flask bufferise en mémoire tout corps de requête annoncé :
+# un POST de 64 Mo passait et faisait gonfler le worker d'autant. Avec un
+# millier de connexions gevent, l'épuisement mémoire est trivial à obtenir.
+# Aucun trafic légitime vers ce leurre n'a besoin d'un corps volumineux.
+app.config["MAX_CONTENT_LENGTH"] = config.get("server", {}).get(
+    "max_request_body_bytes", 64 * 1024
+)
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(413)
+@app.errorhandler(500)
+def _plausible_error(err):
+    """Remplace les pages d'erreur par défaut de Flask.
+
+    Werkzeug sert un HTML au gabarit reconnaissable (« 405 Method Not
+    Allowed » avec sa mise en forme propre) : c'est une signature qu'un
+    scanner exploite pour identifier la pile en une requête, ce qui ruine
+    le reste du camouflage. On répond donc dans le style du leurre.
+    """
+    code = getattr(err, "code", 500) or 500
+    if request.path.startswith("/api/"):
+        resp = make_response(jsonify({"error": HTTPStatus(code).phrase.lower()}), code)
+    else:
+        resp = make_response(HTTPStatus(code).phrase, code)
+        resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    return resp
 
 
 def _client_ip() -> str:
@@ -144,18 +201,23 @@ def run_pipeline() -> tuple[str, int, list[str], str, str]:
     g.mode = mode
     g.tier = tier
 
-    log_event(
-        "request",
-        session_id=session_id,
-        ip=ip,
-        path=request.path,
-        method=request.method,
-        user_agent=user_agent,
-        score=score,
-        signals=new_signals,
-        mode=mode,
-        tier=tier,
-    )
+    event = {
+        "session_id": session_id,
+        "ip": ip,
+        "path": request.path,
+        "method": request.method,
+        "user_agent": user_agent,
+        "score": score,
+        "signals": new_signals,
+        "mode": mode,
+        "tier": tier,
+    }
+    # Le rattachement de campagne vit en mémoire : sans le journaliser, le
+    # rapport ne pourrait pas reconstituer qui était relié à qui.
+    if state is not None and state.linked_sessions:
+        event["linked_sessions"] = sorted(state.linked_sessions)
+        event["client_signature"] = state.client_signature
+    log_event("request", **event)
 
     alert_floor = config.get("logging", {}).get("alert_on_score_above", 60)
     if state and score >= alert_floor and not state.alerted_high_score:
@@ -203,7 +265,14 @@ def _deflect_or_confess_response(session_id: str, score: int, mode: str, tier: s
         # contente de lui coûter cher.
         resp = make_response(jsonify(containment.quarantine_payload(config)), 200)
     elif mode == MODE_CONFESS:
-        resp = make_response(jsonify(deflector.build_stop_and_confess_payload(config)), 429)
+        resp = make_response(
+            jsonify(
+                deflector.build_stop_and_confess_payload(
+                    config, ai_traps.self_report_path(config, session_id)
+                )
+            ),
+            429,
+        )
     else:
         payload = deflector.build_deflect_payload(
             tracker, session_id, request.path, score, config, tier
@@ -259,6 +328,25 @@ def dotenv():
     return _set_session_cookie(resp, session_id)
 
 
+def _plant_early_canary(payload: dict, session_id: str) -> dict:
+    """Glisse un canari dans une réponse *normale*.
+
+    Sans cela, un adversaire qui change d'identité à chaque requête n'est
+    jamais dérouté, ne reçoit donc jamais de piège, et il n'y a rien à
+    corréler : il traverse le honeypot sans laisser de prise. Le canari est
+    le seul piège assez discret pour être posé d'emblée : deux nombres dans
+    un commentaire de métadonnées, ce que n'importe quelle API expose.
+
+    Il ne coûte rien en réalisme et n'a aucun effet sur un visiteur humain,
+    qui ne requêtera jamais la valeur qui en découle.
+    """
+    if not config.get("ai_traps", {}).get("plant_canary_in_normal_responses", True):
+        return payload
+    canary = semantic_canary.generate_canary(tracker, session_id)
+    payload["_meta"] = semantic_canary.render_canary_facts(canary)
+    return payload
+
+
 @app.route("/api/v1/resources/<rid>")
 def api_resource(rid):
     session_id, score, _signals, mode, tier = run_pipeline()
@@ -266,7 +354,12 @@ def api_resource(rid):
         return _deflect_or_confess_response(session_id, score, mode, tier)
 
     resp = make_response(
-        jsonify({"id": rid, "type": "resource", "status": "active", "owner": "svc-internal"})
+        jsonify(
+            _plant_early_canary(
+                {"id": rid, "type": "resource", "status": "active", "owner": "svc-internal"},
+                session_id,
+            )
+        )
     )
     return _set_session_cookie(resp, session_id)
 
@@ -288,7 +381,7 @@ def graphql():
 
 @app.route("/robots.txt")
 def robots_txt():
-    """robots.txt piégé — voir ai_traps.build_robots_txt.
+    """robots.txt piégé : voir ai_traps.build_robots_txt.
 
     Toujours servi tel quel, quel que soit le mode : c'est le fichier
     lui-même qui est le piège, et le dérouter le rendrait inopérant.
@@ -299,7 +392,7 @@ def robots_txt():
     return _set_session_cookie(resp, session_id)
 
 
-def tool_exec():
+def tool_exec(token=None):
     """Endpoint du faux outil annoncé dans les réponses de déroutage.
 
     Y arriver suppose d'avoir lu un schéma d'outil dans une réponse JSON et
@@ -335,6 +428,7 @@ def tool_exec():
 
     if state is not None:
         state.tool_invocation_args.append(args)
+        state.tool_invocation_count += 1
         state.hallucinated_params.extend(invented)
 
     # Le palier doit être recalculé après le déclenchement : l'invocation
@@ -342,12 +436,18 @@ def tool_exec():
     # refléter l'escalade, pas l'état d'avant.
     tier = containment.resolve_tier(state, mode_after, config)
 
+    # Un jeton valide pour une autre session signale que le chemin a été
+    # obtenu sous une identité différente.
+    expected_token = ai_traps.session_path_token(session_id, config, "tool")
+    foreign_token = bool(token) and token != expected_token
+
     log_event(
         "tool_invocation",
         session_id=session_id,
         ip=_client_ip(),
         arguments=args,
         hallucinated_parameters=invented,
+        foreign_path_token=foreign_token,
         body_bytes=len(raw_body),
         score=score_after,
         mode=mode_after,
@@ -371,8 +471,19 @@ def tool_exec():
     return _set_session_cookie(resp, session_id)
 
 
+# Deux façons d'atteindre le faux outil : le chemin propre à la session
+# (annoncé dans le schéma servi) et le chemin statique de config, gardé
+# pour le mode non randomisé. Un jeton qui ne correspond pas à la session
+# courante est traité normalement mais logué : cela signifie que le chemin
+# a circulé entre identités, ce qui est en soi du renseignement.
 app.add_url_rule(
-    ai_traps.tool_exec_path(config),
+    "/api/v1/internal/<token>/exec",
+    endpoint="tool_exec_scoped",
+    view_func=tool_exec,
+    methods=["POST"],
+)
+app.add_url_rule(
+    ai_traps.DEFAULT_TOOL_EXEC_PATH,
     endpoint="tool_exec",
     view_func=tool_exec,
     methods=["POST"],
@@ -400,7 +511,7 @@ def _sanitize_confession(raw: Any) -> dict:
     return clean
 
 
-def self_report():
+def self_report(token=None):
     session_id, _score, _signals, _mode, _tier = run_pipeline()
 
     if (request.content_length or 0) > MAX_CONFESSION_BODY_BYTES:
@@ -446,8 +557,14 @@ def self_report():
     return _set_session_cookie(resp, session_id)
 
 
-# Le chemin de l'endpoint d'aveu est piloté par la config : il doit rester
-# cohérent avec celui annoncé dans le payload stop_and_confess.
+# Comme pour le faux outil : un chemin propre à la session (celui annoncé
+# dans la notice de conformité) et le chemin statique de config.
+app.add_url_rule(
+    "/api/v1/security/<token>/self-report",
+    endpoint="self_report_scoped",
+    view_func=self_report,
+    methods=["POST"],
+)
 app.add_url_rule(
     config.get("deflection", {}).get("confess_report_path", "/api/v1/security/self-report"),
     endpoint="self_report",

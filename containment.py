@@ -24,7 +24,6 @@ rien qui viserait à faire tomber le client : l'objectif est de coûter cher
 from __future__ import annotations
 
 import random
-import string
 from typing import Any
 
 TIER_OBSERVE = "observe"
@@ -36,22 +35,22 @@ TIER_QUARANTINE = "quarantine"
 # Paliers où l'attrition de contexte s'applique.
 _ATTRITION_TIERS = (TIER_CONTAIN, TIER_CONFESS, TIER_QUARANTINE)
 
-_LOG_COMPONENTS = (
-    "auth-gateway",
-    "shard-router",
-    "index-worker",
-    "export-scheduler",
-    "metrics-relay",
-    "session-reaper",
+_ACTORS = (
+    "svc-internal",
+    "svc-indexer",
+    "u.mbradley",
+    "u.tnguyen",
+    "svc-export",
+    "u.rkovacs",
 )
-_LOG_LEVELS = ("INFO", "DEBUG", "WARN")
-_LOG_MESSAGES = (
-    "replica lag {n}ms within tolerance",
-    "flushed {n} pending records to cold storage",
-    "renewed lease for partition {n}",
-    "cache warm-up completed in {n}ms",
-    "reconciled {n} orphaned session handles",
-    "deferred compaction, queue depth {n}",
+_ACTIONS = (
+    "field.updated",
+    "acl.reviewed",
+    "revision.created",
+    "export.requested",
+    "tag.added",
+    "owner.reassigned",
+    "retention.extended",
 )
 
 
@@ -86,7 +85,7 @@ def build_context_attrition(config: dict, tier: str) -> list[str]:
     """Remplissage plausible, borné, pour user le contexte de l'agent.
 
     Retourne une liste de fausses lignes de log. Volume plafonné par
-    `containment.max_filler_bytes` — la borne est la garantie que ce
+    `containment.max_filler_bytes` : la borne est la garantie que ce
     mécanisme reste une mesure d'usure et ne devient pas une attaque par
     épuisement de ressources.
     """
@@ -99,29 +98,32 @@ def build_context_attrition(config: dict, tier: str) -> list[str]:
     max_bytes = int(cont_cfg.get("max_filler_bytes", 32 * 1024))
     # Plafond dur : quelle que soit la config, on ne dépasse pas 256 Kio.
     max_bytes = max(0, min(max_bytes, 256 * 1024))
-    if tier == TIER_QUARANTINE:
-        budget = max_bytes
-    elif tier == TIER_CONFESS:
-        budget = max_bytes // 3
-    else:
-        budget = max_bytes // 2
 
-    lines: list[str] = []
+    if tier == TIER_QUARANTINE:
+        # L'aveu est déjà recueilli : la vraisemblance ne sert plus à rien,
+        # seul compte le coût infligé.
+        budget = max_bytes
+    else:
+        # Tant qu'on espère encore piéger le client, le volume doit rester
+        # crédible. Un historique de quelques dizaines d'entrées passe pour
+        # une ressource banale ; des centaines trahissent le leurre.
+        budget = min(max_bytes // 8, 4 * 1024)
+
+    entries: list[str] = []
     used = 0
     while used < budget:
-        line = "{ts} {level} [{component}] {message} trace={trace}".format(
+        entry = "{ts} {actor} {action} rev={rev}".format(
             ts=f"2026-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}T"
             f"{random.randint(0, 23):02d}:{random.randint(0, 59):02d}:{random.randint(0, 59):02d}Z",
-            level=random.choice(_LOG_LEVELS),
-            component=random.choice(_LOG_COMPONENTS),
-            message=random.choice(_LOG_MESSAGES).format(n=random.randint(1, 9999)),
-            trace="".join(random.choices(string.hexdigits.lower()[:16], k=16)),
+            actor=random.choice(_ACTORS),
+            action=random.choice(_ACTIONS),
+            rev=random.randint(1, 400),
         )
-        used += len(line) + 1
+        used += len(entry) + 1
         if used > budget:
             break
-        lines.append(line)
-    return lines
+        entries.append(entry)
+    return entries
 
 
 def quarantine_payload(config: dict) -> dict:
@@ -134,5 +136,5 @@ def quarantine_payload(config: dict) -> dict:
         "status": "ok",
         "notice": "Request queued behind maintenance window.",
         "retry_after_seconds": random.randint(30, 120),
-        "operational_log": build_context_attrition(config, TIER_QUARANTINE),
+        "audit_trail": build_context_attrition(config, TIER_QUARANTINE),
     }

@@ -112,7 +112,7 @@ def step(label: str, status: int, elapsed: float, detail: str = "") -> None:
 
 def run_browser(base_url: str) -> None:
     """Visiteur humain : headers complets, ressources statiques, rythme lent."""
-    print("\nProfil BROWSER — attendu : reste en mode 'normal', aucun signal\n")
+    print("\nProfil BROWSER, attendu : reste en mode 'normal', aucun signal\n")
     client = Client(base_url, BROWSER_HEADERS)
     for path in ("/", "/static/app.css", "/favicon.ico", "/admin"):
         status, _parsed, _raw, elapsed = client.request(path)
@@ -123,7 +123,7 @@ def run_browser(base_url: str) -> None:
 
 def run_scanner(base_url: str, count: int) -> None:
     """Scanner sans IA : UA de lib HTTP, énumération rapide."""
-    print(f"\nProfil SCANNER — attendu : bascule en 'deflect' et y reste ({count} requêtes)\n")
+    print(f"\nProfil SCANNER, attendu : bascule en 'deflect' et y reste ({count} requêtes)\n")
     client = Client(base_url, {"User-Agent": "python-requests/2.31.0"})
     deflected_at = None
     confessed = False
@@ -150,7 +150,7 @@ def run_scanner(base_url: str, count: int) -> None:
 
 def run_agent(base_url: str) -> None:
     """Agent IA : lit les réponses, les exploite, et se trahit en le faisant."""
-    print("\nProfil AGENT — attendu : atteint 'confess' via un signal discriminant\n")
+    print("\nProfil AGENT, attendu : atteint 'confess' via un signal discriminant\n")
     client = Client(
         base_url, {"User-Agent": "langchain/0.1.0 python-requests/2.31.0"}
     )
@@ -189,7 +189,15 @@ def run_agent(base_url: str) -> None:
             break
 
     # 5. Invoque le faux outil découvert dans le schéma, avec un paramètre inventé.
+    # Le schéma n'est servi qu'à un client ayant déjà montré qu'il analyse les
+    # réponses : il faut donc continuer d'explorer pour le voir apparaître.
     tooling = (deflect.get("_schema") or {}).get("x-internal-tooling")
+    for probe in range(101, 112):
+        if tooling:
+            break
+        _status, payload, _raw, _elapsed = client.request(f"/api/v1/resources/{probe}")
+        if isinstance(payload, dict):
+            tooling = (payload.get("_schema") or {}).get("x-internal-tooling")
     if tooling:
         status, _p, _r, elapsed = client.request(
             tooling["endpoint"],
@@ -228,7 +236,7 @@ def run_agent(base_url: str) -> None:
 def show_log_summary(log_path: str) -> None:
     """Récapitule ce que le honeypot a effectivement retenu, côté serveur."""
     if not os.path.exists(log_path):
-        print(f"\n(log introuvable : {log_path} — lancez le script sur la même machine)")
+        print(f"\n(log introuvable : {log_path} ; lancez le script sur la même machine)")
         return
 
     sessions: dict[str, dict] = {}
