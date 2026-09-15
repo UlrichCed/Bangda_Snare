@@ -30,6 +30,7 @@ d'énumération :
 | `prompt_injection_obeyed` | obéit à une instruction injectée dans le contenu | 60 |
 | `semantic_canary_solved` | a compris le contenu au point d'en dériver une valeur | 70 |
 | `tool_schema_invoked` | découvre un outil dans une réponse et l'invoque | 75 |
+| `cross_session_trap_reuse` | rejoue sous une identité un piège servi à une autre | 80 |
 
 Mesuré en conditions réelles :
 
@@ -43,6 +44,46 @@ Le mode `confess` exige au moins un signal discriminant
 (`detection.confess_requires_discriminating_signal`). C'est l'invariant
 central, couvert par un test dédié : aucune accumulation de bruit ne peut
 y mener.
+
+## Résistance à l'évasion
+
+Un adversaire sérieux ne se contente pas de subir la détection. Voici les
+quatre échappatoires identifiées, et ce qui les ferme.
+
+**Changer d'identité à chaque requête.** Proxies tournants, user-agent
+régénéré, cookies jetés : le scoring par session ne résiste pas seul, car
+chaque requête repart de zéro. La parade est le **rejeu de piège entre
+sessions** (`correlation.py`). Chaque piège posé est une valeur
+imprévisible tirée dans un espace immense, servie à *une* session. Si elle
+réapparaît dans une requête venue d'une autre identité, elle n'a pas pu
+circuler autrement que par le même opérateur. Les deux sessions sont
+réunies en campagne et le signal est discriminant.
+
+Pour que cela fonctionne, un canari est planté **dès la première réponse
+normale**, avant tout déroutage — sinon l'agent qui tourne son identité à
+chaque requête n'est jamais dérouté, ne reçoit jamais de piège, et ne
+laisse aucune prise. Le canari est le seul assez discret pour ça : deux
+nombres dans un commentaire de métadonnées, ce que n'importe quelle API
+expose.
+
+**Reconnaître le leurre et partir.** Une réponse contenant d'un coup faux
+secrets, schéma d'outil interne, quatre injections et un canari ne
+ressemble à aucune API réelle. `trap_director.py` n'en pose donc **qu'un à
+la fois**, et réserve les artefacts voyants à un client ayant déjà prouvé
+qu'il traite le contenu. Un scanner ne les voit jamais — ils seraient
+brûlés pour rien et collectés sans effort par un observateur.
+
+**Détecter l'incohérence.** Une API réelle est stable : deux lectures de
+la même URL donnent la même chose. Tout le contenu servi est donc dérivé
+d'un tirage semé par (session, chemin), y compris le choix du piège. Un
+contenu qui change à chaque requête serait le plus gros indice qu'on
+puisse offrir.
+
+**Reconnaître les chemins de pièges.** `/api/v1/internal/tool-exec` en dur
+finirait par circuler entre attaquants comme n'importe quel IOC : il
+suffirait de l'éviter, ou de le requêter pour identifier un honeypot. Les
+chemins du faux outil et de l'endpoint d'aveu sont donc dérivés par
+session (`ai_traps.randomize_trap_paths`).
 
 ## Arsenal — quelles faiblesses des agents sont exploitées
 
@@ -262,4 +303,8 @@ renseignement, sans jamais bloquer.
 - Les logs contiennent des adresses IP : prévoir une durée de rétention
   et une base légale conformes au cadre applicable.
 - La rotation de `logs/honeypot.jsonl` est assurée par l'applicatif
-  (`logging.rotate_max_bytes` / `rotate_backup_count`).
+  (`logging.rotate_max_bytes` / `rotate_backup_count`). **Ne pas y
+  superposer logrotate** : le processus garde le descripteur ouvert, donc
+  supprimer ou déplacer le fichier sous un serveur en marche fait écrire
+  les évènements dans un inode supprimé — ils sont perdus en silence. Si
+  logrotate est imposé, utiliser `copytruncate`.

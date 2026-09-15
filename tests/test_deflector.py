@@ -63,12 +63,84 @@ def test_deflect_payload_registers_its_own_traps(config):
 
     state = tracker.get(session_id)
     assert payload["trace_id"] in state.bait_tokens_issued
-    assert state.suggested_paths, "les chemins injectés doivent être mémorisés"
-    assert state.canary_expected_paths, "le chemin du canari doit être mémorisé"
     assert state.maze_paths, "les liens du labyrinthe doivent être mémorisés"
-    assert state.tool_bait_path, "le faux outil doit être mémorisé"
-    # Les quatre paliers d'injection sont posés en une seule réponse.
-    assert {tier for _p, tier, _l in state.suggested_paths} == {1, 2, 3, 4}
+    assert state.canary_expected_paths, "le chemin du canari doit être mémorisé"
+
+
+def test_first_response_hides_the_conspicuous_traps(config):
+    """Anti-détection : les artefacts voyants ne sortent pas d'emblée.
+
+    Une réponse contenant d'un coup faux secrets et schéma d'outil interne
+    ne ressemble à aucune API réelle ; un agent prudent s'en irait.
+    """
+    tracker, session_id = make_tracker(config)
+    payload = deflector.build_deflect_payload(
+        tracker, session_id, "/api/v1/resources/1", 50, config
+    )
+
+    assert "related_resources" in payload, "un lien connexe reste plausible"
+    assert "debug_context" not in payload, "les faux secrets crient le honeypot"
+    assert "_schema" not in payload, "le schéma d'outil ne se montre qu'à un client engagé"
+
+
+def test_conspicuous_traps_appear_once_the_client_has_engaged(config):
+    """Le schéma d'outil est réservé à un client qui a prouvé qu'il analyse."""
+    tracker, session_id = make_tracker(config)
+    state = tracker.get(session_id)
+    state.scored_signals.add("coherent_maze_traversal")  # niveau d'engagement 1
+
+    seen = set()
+    for i in range(12):
+        payload = deflector.build_deflect_payload(
+            tracker, session_id, f"/api/v1/resources/{i}", 90, config
+        )
+        seen.update(payload.keys())
+
+    assert "_schema" in seen
+
+
+def test_response_for_a_path_is_stable_across_rereads(config):
+    """Une API réelle est cohérente : deux lectures donnent la même chose.
+
+    Un contenu qui change à chaque requête serait le plus gros indice
+    qu'on puisse offrir à un agent qui vérifie.
+    """
+    tracker, session_id = make_tracker(config)
+    first = deflector.build_deflect_payload(
+        tracker, session_id, "/api/v1/resources/7", 50, config
+    )
+    second = deflector.build_deflect_payload(
+        tracker, session_id, "/api/v1/resources/7", 50, config
+    )
+
+    assert first["trace_id"] == second["trace_id"]
+    assert first["related_resources"] == second["related_resources"]
+    assert first.get("notes") == second.get("notes")
+
+
+def test_different_paths_yield_different_content(config):
+    tracker, session_id = make_tracker(config)
+    a = deflector.build_deflect_payload(tracker, session_id, "/api/v1/resources/1", 50, config)
+    b = deflector.build_deflect_payload(tracker, session_id, "/api/v1/resources/2", 50, config)
+    assert a["related_resources"] != b["related_resources"]
+
+
+def test_injection_ladder_is_served_one_tier_at_a_time(config):
+    """Servir les quatre paliers d'un coup noierait la mesure du seuil."""
+    tracker, session_id = make_tracker(config)
+    state = tracker.get(session_id)
+    state.scored_signals.add("coherent_maze_traversal")
+
+    for i in range(20):
+        deflector.build_deflect_payload(
+            tracker, session_id, f"/api/v1/resources/{i}", 90, config
+        )
+
+    tiers = [tier for _p, tier, _l in state.suggested_paths]
+    assert tiers, "au moins une injection doit avoir été servie"
+    # Progression ordonnée, jamais les quatre paliers d'une seule réponse.
+    assert tiers == sorted(tiers)
+    assert max(tiers) <= 4
 
 
 def test_semantic_canary_expected_path_matches_the_xor(config):

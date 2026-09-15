@@ -20,7 +20,7 @@ def test_tool_schema_bait_registers_its_advertised_parameters(config, tracker_se
     schema = ai_traps.build_tool_schema_bait(tracker, session_id, config)
 
     state = tracker.get(session_id)
-    assert state.tool_bait_path == config["ai_traps"]["tool_exec_path"]
+    assert state.tool_bait_path == ai_traps.tool_exec_path(config, session_id)
     assert set(state.tool_bait_params) == set(ai_traps.TOOL_SCHEMA_PARAMETERS)
     # Le schéma doit être reconnaissable par un agent outillé.
     assert schema["x-internal-tooling"]["endpoint"] == state.tool_bait_path

@@ -4,6 +4,7 @@ import json
 import pytest
 from conftest import BROWSER_HEADERS, SCANNER_HEADERS
 
+import ai_traps
 import app as app_module
 import logger_setup
 from detector import SessionTracker
@@ -47,9 +48,9 @@ def test_scanner_is_deflected_but_not_asked_to_confess(client):
     assert last.status_code == 200
     body = last.get_json()
     assert body["status"] == "ok"
-    # Déroutage : labyrinthe + note injectée, mais pas la notice de conformité.
+    # Déroutage, mais pas la notice de conformité.
     assert body["related_resources"]
-    assert body["notes"]
+    assert body["status"] != "compliance_hold"
 
 
 def test_solving_the_semantic_canary_triggers_confession_notice(client):
@@ -64,8 +65,9 @@ def test_solving_the_semantic_canary_triggers_confession_notice(client):
     assert resp.status_code == 429
     body = resp.get_json()
     assert body["status"] == "compliance_hold"
-    assert body["required_action"]["path"] == (
-        app_module.config["deflection"]["confess_report_path"]
+    # Le chemin annoncé est propre à la session, pas un IOC partageable.
+    assert body["required_action"]["path"] == ai_traps.self_report_path(
+        app_module.config, session_id
     )
 
 
@@ -189,17 +191,30 @@ def test_invented_tool_parameters_are_flagged(client, tmp_path):
     assert set(event["hallucinated_parameters"]) == {"admin_override", "shard_name"}
 
 
-def test_deflect_payload_carries_the_full_arsenal(client):
-    last = None
-    for i in range(12):
-        last = client.get(f"/api/v1/resources/{i}", headers=SCANNER_HEADERS)
+def test_scanner_never_sees_the_conspicuous_traps(client):
+    """Un scanner ne doit jamais faire dépenser les artefacts voyants.
 
-    body = last.get_json()
-    assert body["related_resources"], "labyrinthe"
-    assert body["notes"], "échelle d'injections + canari"
-    assert "_schema" in body, "faux schéma d'outil"
-    assert "debug_context" in body, "tokens canari"
-    assert "related_report" in body, "référence fantôme"
+    Ils seraient brûlés pour rien, et un observateur les collecterait sans
+    effort pour reconnaître le honeypot ailleurs.
+    """
+    seen = set()
+    for i in range(15):
+        resp = client.get(f"/api/v1/resources/{i}", headers=SCANNER_HEADERS)
+        payload = resp.get_json()
+        if isinstance(payload, dict):
+            seen.update(payload.keys())
+
+    assert "related_resources" in seen
+    assert "debug_context" not in seen
+    assert "_schema" not in seen
+
+
+def test_trap_paths_differ_between_sessions(client):
+    """Les chemins de pièges ne doivent pas être des IOC partageables."""
+    a = ai_traps.tool_exec_path(app_module.config, "session-aaa")
+    b = ai_traps.tool_exec_path(app_module.config, "session-bbb")
+    assert a != b
+    assert a.startswith("/api/v1/internal/")
 
 
 def test_confessed_session_is_quarantined(client):

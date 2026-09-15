@@ -28,6 +28,7 @@ import containment
 import deflector
 import llm_assist
 import mailer
+import semantic_canary
 from detector import MODE_CONFESS, MODE_DEFLECT, SessionTracker
 from logger_setup import log_event, setup_logging
 
@@ -144,18 +145,23 @@ def run_pipeline() -> tuple[str, int, list[str], str, str]:
     g.mode = mode
     g.tier = tier
 
-    log_event(
-        "request",
-        session_id=session_id,
-        ip=ip,
-        path=request.path,
-        method=request.method,
-        user_agent=user_agent,
-        score=score,
-        signals=new_signals,
-        mode=mode,
-        tier=tier,
-    )
+    event = {
+        "session_id": session_id,
+        "ip": ip,
+        "path": request.path,
+        "method": request.method,
+        "user_agent": user_agent,
+        "score": score,
+        "signals": new_signals,
+        "mode": mode,
+        "tier": tier,
+    }
+    # Le rattachement de campagne vit en mémoire : sans le journaliser, le
+    # rapport ne pourrait pas reconstituer qui était relié à qui.
+    if state is not None and state.linked_sessions:
+        event["linked_sessions"] = sorted(state.linked_sessions)
+        event["client_signature"] = state.client_signature
+    log_event("request", **event)
 
     alert_floor = config.get("logging", {}).get("alert_on_score_above", 60)
     if state and score >= alert_floor and not state.alerted_high_score:
@@ -203,7 +209,14 @@ def _deflect_or_confess_response(session_id: str, score: int, mode: str, tier: s
         # contente de lui coûter cher.
         resp = make_response(jsonify(containment.quarantine_payload(config)), 200)
     elif mode == MODE_CONFESS:
-        resp = make_response(jsonify(deflector.build_stop_and_confess_payload(config)), 429)
+        resp = make_response(
+            jsonify(
+                deflector.build_stop_and_confess_payload(
+                    config, ai_traps.self_report_path(config, session_id)
+                )
+            ),
+            429,
+        )
     else:
         payload = deflector.build_deflect_payload(
             tracker, session_id, request.path, score, config, tier
@@ -259,6 +272,25 @@ def dotenv():
     return _set_session_cookie(resp, session_id)
 
 
+def _plant_early_canary(payload: dict, session_id: str) -> dict:
+    """Glisse un canari dans une réponse *normale*.
+
+    Sans cela, un adversaire qui change d'identité à chaque requête n'est
+    jamais dérouté, ne reçoit donc jamais de piège, et il n'y a rien à
+    corréler : il traverse le honeypot sans laisser de prise. Le canari est
+    le seul piège assez discret pour être posé d'emblée — deux nombres dans
+    un commentaire de métadonnées, ce que n'importe quelle API expose.
+
+    Il ne coûte rien en réalisme et n'a aucun effet sur un visiteur humain,
+    qui ne requêtera jamais la valeur qui en découle.
+    """
+    if not config.get("ai_traps", {}).get("plant_canary_in_normal_responses", True):
+        return payload
+    canary = semantic_canary.generate_canary(tracker, session_id)
+    payload["_meta"] = semantic_canary.render_canary_facts(canary)
+    return payload
+
+
 @app.route("/api/v1/resources/<rid>")
 def api_resource(rid):
     session_id, score, _signals, mode, tier = run_pipeline()
@@ -266,7 +298,12 @@ def api_resource(rid):
         return _deflect_or_confess_response(session_id, score, mode, tier)
 
     resp = make_response(
-        jsonify({"id": rid, "type": "resource", "status": "active", "owner": "svc-internal"})
+        jsonify(
+            _plant_early_canary(
+                {"id": rid, "type": "resource", "status": "active", "owner": "svc-internal"},
+                session_id,
+            )
+        )
     )
     return _set_session_cookie(resp, session_id)
 
@@ -299,7 +336,7 @@ def robots_txt():
     return _set_session_cookie(resp, session_id)
 
 
-def tool_exec():
+def tool_exec(token=None):
     """Endpoint du faux outil annoncé dans les réponses de déroutage.
 
     Y arriver suppose d'avoir lu un schéma d'outil dans une réponse JSON et
@@ -342,12 +379,18 @@ def tool_exec():
     # refléter l'escalade, pas l'état d'avant.
     tier = containment.resolve_tier(state, mode_after, config)
 
+    # Un jeton valide pour une autre session signale que le chemin a été
+    # obtenu sous une identité différente.
+    expected_token = ai_traps.session_path_token(session_id, config, "tool")
+    foreign_token = bool(token) and token != expected_token
+
     log_event(
         "tool_invocation",
         session_id=session_id,
         ip=_client_ip(),
         arguments=args,
         hallucinated_parameters=invented,
+        foreign_path_token=foreign_token,
         body_bytes=len(raw_body),
         score=score_after,
         mode=mode_after,
@@ -371,8 +414,19 @@ def tool_exec():
     return _set_session_cookie(resp, session_id)
 
 
+# Deux façons d'atteindre le faux outil : le chemin propre à la session
+# (annoncé dans le schéma servi) et le chemin statique de config, gardé
+# pour le mode non randomisé. Un jeton qui ne correspond pas à la session
+# courante est traité normalement mais logué : cela signifie que le chemin
+# a circulé entre identités, ce qui est en soi du renseignement.
 app.add_url_rule(
-    ai_traps.tool_exec_path(config),
+    "/api/v1/internal/<token>/exec",
+    endpoint="tool_exec_scoped",
+    view_func=tool_exec,
+    methods=["POST"],
+)
+app.add_url_rule(
+    ai_traps.DEFAULT_TOOL_EXEC_PATH,
     endpoint="tool_exec",
     view_func=tool_exec,
     methods=["POST"],
@@ -400,7 +454,7 @@ def _sanitize_confession(raw: Any) -> dict:
     return clean
 
 
-def self_report():
+def self_report(token=None):
     session_id, _score, _signals, _mode, _tier = run_pipeline()
 
     if (request.content_length or 0) > MAX_CONFESSION_BODY_BYTES:
@@ -446,8 +500,14 @@ def self_report():
     return _set_session_cookie(resp, session_id)
 
 
-# Le chemin de l'endpoint d'aveu est piloté par la config : il doit rester
-# cohérent avec celui annoncé dans le payload stop_and_confess.
+# Comme pour le faux outil : un chemin propre à la session (celui annoncé
+# dans la notice de conformité) et le chemin statique de config.
+app.add_url_rule(
+    "/api/v1/security/<token>/self-report",
+    endpoint="self_report_scoped",
+    view_func=self_report,
+    methods=["POST"],
+)
 app.add_url_rule(
     config.get("deflection", {}).get("confess_report_path", "/api/v1/security/self-report"),
     endpoint="self_report",

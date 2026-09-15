@@ -61,6 +61,9 @@ detection:
     semantic_canary_solved: 70
     # Invoquer un outil découvert dans une réponse : quasi sans faux positif.
     tool_schema_invoked: 75
+    # Rejeu d'un piège servi à une autre session : la valeur était
+    # imprévisible, la corrélation est donc quasi certaine.
+    cross_session_trap_reuse: 80
   known_agent_ua_patterns:
     - "langchain"
     - "autogpt"
@@ -107,6 +110,16 @@ ai_traps:
   # découvre et l'invoque ; un humain ne le voit pas, un scanner l'ignore.
   tool_schema_bait_enabled: true
   tool_exec_path: "/api/v1/internal/tool-exec"
+  # Chemins de pièges dérivés par session. Un chemin global finirait par
+  # circuler entre attaquants comme n'importe quel IOC : il suffirait de
+  # l'éviter pour esquiver le piège, ou de le requêter pour reconnaître un
+  # honeypot. À personnaliser.
+  # Le canari est assez discret pour etre pose des la premiere reponse,
+  # avant tout deroutage. Sans cela, un adversaire qui change d'identite a
+  # chaque requete ne recoit jamais de piege et ne laisse aucune prise.
+  plant_canary_in_normal_responses: true
+  randomize_trap_paths: true
+  path_salt: "change-me-honeypot-paths-v1"
   # robots.txt piégé : le respecter comme l'exploiter sont informatifs.
   robots_trap_enabled: true
   robots_disallow_path: "/api/v1/internal/archive"
@@ -114,6 +127,22 @@ ai_traps:
   # langue naturelle dans les paramètres, formules d'assistant).
   llm_artifact_detection: true
   latency_signature_enabled: true
+
+# Dévoilement progressif des pièges. Une réponse contenant d'un coup faux
+# secrets, schéma d'outil, quatre injections et un canari ne ressemble à
+# aucune API réelle : un agent prudent y reconnaît un leurre et s'en va.
+# On n'en pose donc qu'un à la fois, selon ce que le client a démontré.
+trap_director:
+  enabled: true
+  # Au-delà de ce nombre de réponses appâtées sans réaction, on cesse de
+  # dépenser des pièges : ils seraient brûlés pour rien.
+  give_up_after_unengaged_responses: 6
+  memo_max_paths: 200
+
+# Corrélation de campagne : suivre un adversaire qui change d'identité.
+correlation:
+  enabled: true
+  trap_registry_max_entries: 50000
 
 # Escalade du confinement. L'attrition de contexte sert du remplissage
 # plausible pour consommer la fenêtre de contexte et le budget de tokens
