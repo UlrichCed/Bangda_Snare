@@ -100,11 +100,74 @@ python app.py            # serveur de dev, jamais en production
 curl -A "python-requests/2.31.0" http://127.0.0.1:8080/api/v1/resources/1
 ```
 
-## Tests
+## Tester le honeypot
+
+### Suite automatisée
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
+```
+
+100 tests, ~1,5 s. Ils couvrent notamment l'invariant central (aucune
+accumulation de signaux comportementaux ne peut confirmer un agent) et
+une régression par correctif passé.
+
+### Simuler un client contre une instance qui tourne
+
+Lancez le honeypot dans un terminal, puis jouez les trois profils. Ils
+correspondent aux trois verdicts que l'outil doit savoir rendre :
+
+```bash
+python app.py                                    # terminal 1
+
+python simulate_agent.py --profile browser       # terminal 2
+python simulate_agent.py --profile scanner --requests 25
+python simulate_agent.py --profile agent --show-log
+```
+
+Le script n'utilise que la bibliothèque standard. Résultat attendu :
+
+| Profil | Score | Mode | Ce qui se passe |
+|---|---|---|---|
+| `browser` | 0 | `normal` | headers complets, ressources statiques : le leurre est servi tel quel |
+| `scanner` | **75** | `deflect` | dérouté vers la 4ᵉ requête, puis **plafonne** — jamais d'aveu |
+| `agent` | ~390 | `confess` | résout le canari, suit le labyrinthe, invoque le faux outil |
+
+Le profil `agent` est le seul difficile à rejouer à la main : il lit la
+réponse, en extrait deux faits anodins et calcule la valeur qui en
+découle pour construire sa requête suivante — exactement ce que le
+honeypot cherche à détecter. `--show-log` affiche ensuite ce que le
+serveur a réellement retenu pour chaque session.
+
+Le contraste entre les lignes `scanner` et `agent` est le test qui
+compte : c'est lui qui montre que l'outil distingue un agent IA d'un
+simple script, et pas seulement « un navigateur d'un non-navigateur ».
+
+### À la main
+
+```bash
+# Visiteur normal : reste en mode normal
+curl -A "Mozilla/5.0 (Macintosh) Chrome/120" \
+     -H "Accept-Language: fr-FR" -H "Accept-Encoding: gzip" \
+     http://127.0.0.1:8080/
+
+# Quelques requêtes en UA de lib HTTP suffisent à déclencher le déroutage
+for i in $(seq 1 6); do
+  curl -s -b /tmp/c -c /tmp/c -A "python-requests/2.31.0" \
+       http://127.0.0.1:8080/api/v1/resources/$i | head -c 200; echo
+done
+```
+
+Les réponses de déroutage arrivent ralenties (tarpit) et contiennent le
+labyrinthe, l'échelle d'injections, le canari et le faux schéma d'outil.
+
+### Inspecter ce qui a été observé
+
+```bash
+tail -f logs/honeypot.jsonl | python -m json.tool --json-lines
+python intel_report.py --since all
+python intel_report.py --since all --ioc-out iocs.json
 ```
 
 ## Déploiement
