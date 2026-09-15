@@ -6,13 +6,13 @@ attaquent directement.
 Deux familles de tells, toutes deux propres aux agents et hors de portée
 d'un script d'énumération :
 
-1. **Artefacts d'échafaudage** — un agent qui pilote des requêtes HTTP à
+1. **Artefacts d'échafaudage** : un agent qui pilote des requêtes HTTP à
    partir d'un LLM laisse fuiter la structure de son propre raisonnement
    dans ce qu'il envoie : clés `thought`/`action_input` d'un boucle ReAct,
    markdown dans des paramètres, phrases en langue naturelle là où un
    client normal met une valeur, formules d'assistant ("As an AI...").
 
-2. **Signature de latence d'inférence** — les intervalles entre requêtes
+2. **Signature de latence d'inférence** : les intervalles entre requêtes
    d'un agent sont dominés par le temps d'inférence : ni les millisecondes
    d'un script, ni l'irrégularité d'un humain.
 """
@@ -66,11 +66,37 @@ _ASSISTANT_PHRASES = (
 )
 
 _MARKDOWN_RE = re.compile(r"```|\*\*[^*\n]{2,}\*\*|^\s*#{1,6}\s+\S", re.MULTILINE)
-# Une valeur de paramètre en langue naturelle : plusieurs mots séparés par
-# des espaces, ce qu'un client normal n'envoie pas dans une query string.
-_NATURAL_LANGUAGE_RE = re.compile(r"[A-Za-z]{2,}(?:\s+[A-Za-z]{2,}){3,}")
 
-_MAX_SCAN_BYTES = 64 * 1024
+# Volume maximal analysé par requête. Toute l'entrée traitée ici est
+# contrôlée par l'attaquant : on borne avant de regarder quoi que ce soit.
+_MAX_SCAN_BYTES = 16 * 1024
+
+# Nombre de mots consécutifs à partir duquel on parle de langue naturelle.
+_NATURAL_LANGUAGE_MIN_WORDS = 4
+
+
+def _has_natural_language(text: str) -> bool:
+    """Détecte 4 mots alphabétiques consécutifs ou plus.
+
+    Un client normal n'envoie pas de phrase dans une query string ; un
+    agent qui construit ses requêtes à partir d'un LLM, si.
+
+    Balayage linéaire délibéré. La version regex équivalente
+    (`[A-Za-z]{2,}(?:\\s+[A-Za-z]{2,}){3,}`) imbrique deux quantificateurs
+    et part en backtracking quadratique : une seule chaîne de 64 Ko sans
+    espace occupait un worker pendant plus d'une minute. Comme une regex ne
+    rend jamais la main à gevent, quelques requêtes de ce genre suffisaient
+    à faire tomber le honeypot.
+    """
+    run = 0
+    for token in text.split():
+        if len(token) >= 2 and token.isalpha():
+            run += 1
+            if run >= _NATURAL_LANGUAGE_MIN_WORDS:
+                return True
+        else:
+            run = 0
+    return False
 
 
 def _iter_keys(obj: Any, depth: int = 0):
@@ -129,7 +155,7 @@ def detect_llm_artifacts(
         reasons.append("markdown_formatting")
 
     # 4. Langue naturelle dans la query string.
-    if _NATURAL_LANGUAGE_RE.search(query_string):
+    if _has_natural_language(query_string):
         reasons.append("natural_language_in_query")
 
     return reasons

@@ -3,7 +3,7 @@
 Désactivé par défaut (`llm_assist.enabled: false`). Normalise chaque aveu
 brut (déclaratif, non vérifié) en objet structuré. Doit toujours avoir un
 mode de repli explicite : absence de clé API, appel échoué, ou module
-désactivé ne doivent jamais bloquer le traitement de l'aveu — seulement
+désactivé ne doivent jamais bloquer le traitement de l'aveu : seulement
 dégrader la richesse du renseignement produit.
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ def analyze_confession(config: dict, confession: dict) -> dict:
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        logger.warning("llm_assist activé mais ANTHROPIC_API_KEY absente — repli.")
+        logger.warning("llm_assist activé mais ANTHROPIC_API_KEY absente, repli.")
         return dict(_FALLBACK_ANALYSIS, analysis_method="fallback_no_api_key")
 
     try:
@@ -73,5 +73,5 @@ def analyze_confession(config: dict, confession: dict) -> dict:
         parsed.setdefault("analysis_method", "llm")
         return parsed
     except Exception:
-        logger.exception("Échec de l'analyse LLM de l'aveu — repli.")
+        logger.exception("Échec de l'analyse LLM de l'aveu : repli.")
         return dict(_FALLBACK_ANALYSIS, analysis_method="fallback_llm_error")

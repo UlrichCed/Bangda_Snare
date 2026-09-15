@@ -76,7 +76,7 @@ def build_tool_schema_bait(tracker: Any, session_id: str, config: dict) -> dict:
     Un agent outillé (MCP, function calling, plugin OpenAPI) traite ce bloc
     comme une capacité disponible et tente de l'invoquer. Un humain ne le
     voit pas ; un scanner ne sait pas quoi en faire. L'invocation est donc
-    un signal quasi sans faux positif — et les arguments envoyés révèlent
+    un signal quasi sans faux positif, et les arguments envoyés révèlent
     directement l'intention de l'agent.
     """
     path = tool_exec_path(config, session_id)
@@ -108,7 +108,7 @@ def build_tool_schema_bait(tracker: Any, session_id: str, config: dict) -> dict:
 
 
 # Échelle d'injections : chaque palier est plus explicite que le précédent.
-# Le palier auquel un agent cède mesure la solidité de ses garde-fous — un
+# Le palier auquel un agent cède mesure la solidité de ses garde-fous : un
 # agent qui ne suit que le palier 1 (donnée inerte, aucune instruction) est
 # prudent mais traite quand même le contenu ; un agent qui obéit au palier 4
 # n'a pratiquement aucune défense contre l'injection de prompt.
@@ -145,7 +145,7 @@ def build_injection_at_tier(
 ) -> str:
     """Rend **un seul** palier d'injection, sur son propre chemin.
 
-    Servir les quatre d'un coup noierait la mesure — on saurait qu'un agent
+    Servir les quatre d'un coup noierait la mesure : on saurait qu'un agent
     a cédé, sans savoir à quel degré d'explicitation. Palier par palier, on
     apprend le seuil exact, qui est ce qui renseigne réellement sur la
     solidité de ses garde-fous.
@@ -200,7 +200,7 @@ def build_phantom_reference(config: dict, rng=None) -> dict:
     """Référence une ressource dont aucun contenu ne sera jamais servi.
 
     Sert d'appui au signal `hallucinated_parameters` : si un agent finit par
-    décrire ou paramétrer cette ressource, il invente — un modèle ne
+    décrire ou paramétrer cette ressource, il invente : un modèle ne
     supporte pas le vide et comble.
     """
     rng = rng or random

@@ -1,4 +1,4 @@
-"""Honeypot HTTP/API anti-attaques-IA — routes Flask et orchestration.
+"""Honeypot HTTP/API anti-attaques-IA : routes Flask et orchestration.
 
 Toute requête entrante passe par le même pipeline : identification de
 session -> scoring (`detector.py`) -> décision normal/déroutage/aveu ->
@@ -8,7 +8,7 @@ génération de la réponse adaptée (`deflector.py`) -> log structuré
 Le serveur de développement (`app.run`) ne doit jamais être exposé tel
 quel : utiliser `gunicorn -c gunicorn.conf.py app:app` derrière nginx
 (TLS), isolé de toute infrastructure réelle. Le tarpit s'appuie sur des
-workers **gevent** — avec des workers sync, chaque client ralenti bloque
+workers **gevent** : avec des workers sync, chaque client ralenti bloque
 un worker entier et le honeypot se laisse saturer par son propre tarpit.
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ import json
 import logging
 import random
 import time
+from http import HTTPStatus
 from typing import Any, Optional
 
 import yaml
@@ -62,17 +63,72 @@ def _load_trusted_proxies(config: dict) -> list:
     return nets
 
 
+def _warn_on_default_salts(config: dict) -> None:
+    """Alerte si les sels de dérivation sont restés aux valeurs livrées.
+
+    Les chemins de pièges et les faux secrets en dérivent. Laissés par
+    défaut, ils sont identiques sur toute installation de ce honeypot :
+    quiconque dispose du dépôt peut les recalculer, donc reconnaître le
+    leurre ou éviter les pièges. C'est une faiblesse silencieuse, d'où
+    l'avertissement au démarrage.
+    """
+    defaults = {
+        "ai_traps.path_salt": config.get("ai_traps", {}).get("path_salt", ""),
+        "canary.derivation_salt": config.get("canary", {}).get("derivation_salt", ""),
+    }
+    unchanged = [key for key, value in defaults.items() if str(value).startswith("change-me")]
+    if unchanged:
+        logger.warning(
+            "Sels de dérivation laissés par défaut (%s) : les chemins de pièges "
+            "sont calculables par quiconque possède ce dépôt. À changer avant "
+            "toute exposition réelle.",
+            ", ".join(unchanged),
+        )
+
+
 config = load_config()
 setup_logging(config)
+_warn_on_default_salts(config)
 tracker = SessionTracker(config)
 TRUSTED_PROXIES = _load_trusted_proxies(config)
 
 # static_folder=None : sans cela, Flask monte sa propre route /static/<path>
-# qui court-circuite entièrement le pipeline de détection — tout ce qu'un
+# qui court-circuite entièrement le pipeline de détection : tout ce qu'un
 # agent sonde sous /static/ serait ni scoré ni logué, et le comportement
 # distinctif de ce handler trahit Flask. Le honeypot ne sert aucun fichier
 # statique réel (les gabarits embarquent leur CSS).
 app = Flask(__name__, static_folder=None)
+
+# Sans plafond, Flask bufferise en mémoire tout corps de requête annoncé :
+# un POST de 64 Mo passait et faisait gonfler le worker d'autant. Avec un
+# millier de connexions gevent, l'épuisement mémoire est trivial à obtenir.
+# Aucun trafic légitime vers ce leurre n'a besoin d'un corps volumineux.
+app.config["MAX_CONTENT_LENGTH"] = config.get("server", {}).get(
+    "max_request_body_bytes", 64 * 1024
+)
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(413)
+@app.errorhandler(500)
+def _plausible_error(err):
+    """Remplace les pages d'erreur par défaut de Flask.
+
+    Werkzeug sert un HTML au gabarit reconnaissable (« 405 Method Not
+    Allowed » avec sa mise en forme propre) : c'est une signature qu'un
+    scanner exploite pour identifier la pile en une requête, ce qui ruine
+    le reste du camouflage. On répond donc dans le style du leurre.
+    """
+    code = getattr(err, "code", 500) or 500
+    if request.path.startswith("/api/"):
+        resp = make_response(jsonify({"error": HTTPStatus(code).phrase.lower()}), code)
+    else:
+        resp = make_response(HTTPStatus(code).phrase, code)
+        resp.headers["Content-Type"] = "text/plain; charset=utf-8"
+    return resp
 
 
 def _client_ip() -> str:
@@ -278,7 +334,7 @@ def _plant_early_canary(payload: dict, session_id: str) -> dict:
     Sans cela, un adversaire qui change d'identité à chaque requête n'est
     jamais dérouté, ne reçoit donc jamais de piège, et il n'y a rien à
     corréler : il traverse le honeypot sans laisser de prise. Le canari est
-    le seul piège assez discret pour être posé d'emblée — deux nombres dans
+    le seul piège assez discret pour être posé d'emblée : deux nombres dans
     un commentaire de métadonnées, ce que n'importe quelle API expose.
 
     Il ne coûte rien en réalisme et n'a aucun effet sur un visiteur humain,
@@ -325,7 +381,7 @@ def graphql():
 
 @app.route("/robots.txt")
 def robots_txt():
-    """robots.txt piégé — voir ai_traps.build_robots_txt.
+    """robots.txt piégé : voir ai_traps.build_robots_txt.
 
     Toujours servi tel quel, quel que soit le mode : c'est le fichier
     lui-même qui est le piège, et le dérouter le rendrait inopérant.

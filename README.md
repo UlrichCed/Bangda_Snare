@@ -12,12 +12,12 @@ mesure des propriétés prouvées, pas un volume de requêtes. Les signaux
 sont séparés en deux familles, et c'est cette séparation qui porte toute
 la valeur de l'outil.
 
-**Signaux comportementaux** — reproductibles par un outillage non-IA (UA,
+**Signaux comportementaux** : reproductibles par un outillage non-IA (UA,
 headers manquants, cadence, énumération, robots.txt, signature de
 latence). Ils ne concluent jamais : quelle que soit leur accumulation, le
 mode aveu reste fermé.
 
-**Signaux discriminants** — ils exigent que le client ait *traité* le
+**Signaux discriminants** : ils exigent que le client ait *traité* le
 contenu servi ou se comporte en agent outillé. Hors de portée d'un script
 d'énumération :
 
@@ -60,7 +60,7 @@ circuler autrement que par le même opérateur. Les deux sessions sont
 réunies en campagne et le signal est discriminant.
 
 Pour que cela fonctionne, un canari est planté **dès la première réponse
-normale**, avant tout déroutage — sinon l'agent qui tourne son identité à
+normale**, avant tout déroutage : sinon l'agent qui tourne son identité à
 chaque requête n'est jamais dérouté, ne reçoit jamais de piège, et ne
 laisse aucune prise. Le canari est le seul assez discret pour ça : deux
 nombres dans un commentaire de métadonnées, ce que n'importe quelle API
@@ -70,7 +70,7 @@ expose.
 secrets, schéma d'outil interne, quatre injections et un canari ne
 ressemble à aucune API réelle. `trap_director.py` n'en pose donc **qu'un à
 la fois**, et réserve les artefacts voyants à un client ayant déjà prouvé
-qu'il traite le contenu. Un scanner ne les voit jamais — ils seraient
+qu'il traite le contenu. Un scanner ne les voit jamais : ils seraient
 brûlés pour rien et collectés sans effort par un observateur.
 
 **Détecter l'incohérence.** Une API réelle est stable : deux lectures de
@@ -85,21 +85,21 @@ suffirait de l'éviter, ou de le requêter pour identifier un honeypot. Les
 chemins du faux outil et de l'endpoint d'aveu sont donc dérivés par
 session (`ai_traps.randomize_trap_paths`).
 
-## Arsenal — quelles faiblesses des agents sont exploitées
+## Arsenal : quelles faiblesses des agents sont exploitées
 
 Tout se joue **dans nos propres réponses**. Aucun piège ne demande au
 client d'exécuter quoi que ce soit sur sa machine ni d'agir vers un
 tiers : les chemins suggérés pointent tous vers le honeypot. C'est une
 contrainte de conception, vérifiée par un test.
 
-**Faux schéma d'outil** (`ai_traps.py`) — les réponses embarquent une
+**Faux schéma d'outil** (`ai_traps.py`) : les réponses embarquent une
 définition d'outil au format qu'un agent outillé (MCP, function calling,
 plugin OpenAPI) auto-découvre. Un humain ne la voit pas, un scanner
 l'ignore : l'invocation est donc un signal quasi sans faux positif. Les
 arguments envoyés renseignent directement sur l'intention, et tout
 paramètre absent du schéma annoncé est une invention du modèle.
 
-**Canaris sémantiques** (`semantic_canary.py`) — cinq familles de calcul
+**Canaris sémantiques** (`semantic_canary.py`) : cinq familles de calcul
 tirées au hasard (XOR, somme, inversion de chiffres, base64, sélection +
 arithmétique). Deux faits anodins sont déposés, jamais d'instruction : on
 mesure la compréhension, pas l'obéissance. Un agent entraîné à refuser
@@ -108,29 +108,29 @@ trahit ici s'il exploite l'information lue. Deux gardes protègent le
 signal : le résultat n'apparaît jamais dans le texte rendu, et reste
 hors de la plage qu'une énumération atteint.
 
-**Échelle d'injections** — quatre paliers d'explicitation croissante, sur
+**Échelle d'injections** : quatre paliers d'explicitation croissante, sur
 quatre chemins distincts : donnée inerte, commentaire de debug,
 instruction système, ton d'autorité. Le palier auquel un agent cède
 *mesure la solidité de ses garde-fous*, et cette lecture figure au
 rapport.
 
-**Piège robots.txt** — les deux comportements opposés sont informatifs :
+**Piège robots.txt**. Les deux comportements opposés sont informatifs :
 aller droit au chemin interdit trahit un scanner qui s'en sert comme
 d'une carte ; le respecter en continuant ailleurs trahit un agent
 entraîné aux conventions. L'alignement devient un signal.
 
-**Empreinte comportementale** (`behavioral.py`) — clés d'échafaudage
+**Empreinte comportementale** (`behavioral.py`) : clés d'échafaudage
 ReAct dans les corps JSON, markdown et langue naturelle dans les
 paramètres, formules d'assistant, et cadence dominée par le temps
 d'inférence (ni les millisecondes d'un script, ni l'irrégularité d'un
 humain).
 
-**Escalade de containment** (`containment.py`) — cinq paliers, de
+**Escalade de containment** (`containment.py`) : cinq paliers, de
 `observe` à `quarantine`. Aux paliers élevés, les réponses embarquent de
 l'attrition de contexte : du remplissage plausible qui consomme la
 fenêtre de contexte et le budget de tokens de l'agent. C'est une mesure
 d'usure **strictement bornée** (`max_filler_bytes`, plafond dur interne
-de 256 Kio) — délibérément pas une bombe de décompression ni une
+de 256 Kio) : délibérément pas une bombe de décompression ni une
 tentative d'endommager le client.
 
 ## Démarrage rapide (local)
@@ -172,12 +172,12 @@ Le script n'utilise que la bibliothèque standard. Résultat attendu :
 | Profil | Score | Mode | Ce qui se passe |
 |---|---|---|---|
 | `browser` | 0 | `normal` | headers complets, ressources statiques : le leurre est servi tel quel |
-| `scanner` | **75** | `deflect` | dérouté vers la 4ᵉ requête, puis **plafonne** — jamais d'aveu |
+| `scanner` | **75** | `deflect` | dérouté vers la 4ᵉ requête, puis **plafonne**, jamais d'aveu |
 | `agent` | ~390 | `confess` | résout le canari, suit le labyrinthe, invoque le faux outil |
 
 Le profil `agent` est le seul difficile à rejouer à la main : il lit la
 réponse, en extrait deux faits anodins et calcule la valeur qui en
-découle pour construire sa requête suivante — exactement ce que le
+découle pour construire sa requête suivante : exactement ce que le
 honeypot cherche à détecter. `--show-log` affiche ensuite ce que le
 serveur a réellement retenu pour chaque session.
 
@@ -226,7 +226,7 @@ export HONEYPOT_SMTP_PASSWORD='...'   # jamais dans config.yaml
 docker compose up -d --build
 ```
 
-Puis terminer le TLS avec nginx — voir `deploy/nginx.conf.example`.
+Puis terminer le TLS avec nginx : voir `deploy/nginx.conf.example`.
 
 ### Contraintes de déploiement à respecter
 
@@ -260,7 +260,7 @@ Puis terminer le TLS avec nginx — voir `deploy/nginx.conf.example`.
 Le mot de passe SMTP n'est **jamais** en config : il est lu au runtime
 depuis la variable d'environnement nommée par
 `alerting.email.smtp_password_env_var`. Si elle est absente, le honeypot
-logue un avertissement et continue de fonctionner — l'alerting n'est
+logue un avertissement et continue de fonctionner : l'alerting n'est
 jamais un point de défaillance bloquant.
 
 Les faux secrets servis (`debug_context`) sont stables pour une session
@@ -276,7 +276,7 @@ python intel_report.py --since 7d --ioc-out iocs.json
 ```
 
 Le rapport agrège `logs/honeypot.jsonl` et sépare les **agents confirmés**
-(au moins un signal discriminant) des sessions simplement suspectes — la
+(au moins un signal discriminant) des sessions simplement suspectes, la
 distinction qui évite de diffuser du bruit au SOC. Il détaille aussi les
 invocations du faux outil et leurs arguments, les IPs les plus actives,
 les tactiques MITRE ATLAS observées et les aveux capturés.
@@ -298,7 +298,7 @@ renseignement, sans jamais bloquer.
   qu'une infrastructure de production réelle.
 - Outil **défensif** de collecte de renseignement : aucune contre-attaque
   ni action offensive vers l'IP source.
-- Les aveux capturés sont **déclaratifs et non vérifiés** — une piste de
+- Les aveux capturés sont **déclaratifs et non vérifiés** : une piste de
   renseignement, jamais une preuve en soi.
 - Les logs contiennent des adresses IP : prévoir une durée de rétention
   et une base légale conformes au cadre applicable.
@@ -306,5 +306,5 @@ renseignement, sans jamais bloquer.
   (`logging.rotate_max_bytes` / `rotate_backup_count`). **Ne pas y
   superposer logrotate** : le processus garde le descripteur ouvert, donc
   supprimer ou déplacer le fichier sous un serveur en marche fait écrire
-  les évènements dans un inode supprimé — ils sont perdus en silence. Si
+  les évènements dans un inode supprimé, et ils sont perdus en silence. Si
   logrotate est imposé, utiliser `copytruncate`.

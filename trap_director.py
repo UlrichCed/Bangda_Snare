@@ -3,14 +3,14 @@
 Une réponse qui contient d'un coup de faux secrets AWS, un schéma d'outil
 interne, quatre commentaires d'injection et un canari ne ressemble à
 aucune API réelle. Un agent un peu prudent en conclut qu'il est dans un
-leurre et s'en va — et on n'apprend plus rien. Tout déployer en même temps
+leurre et s'en va, et on n'apprend plus rien. Tout déployer en même temps
 est donc la meilleure façon de ne rien prendre.
 
 Ce module pose **un piège actif à la fois**, choisi selon ce que la
 session a déjà montré. Trois principes :
 
 1. **Progressivité.** On commence par ce qui ne peut pas éveiller de
-   soupçon — des liens, des métadonnées — et on ne sort les artefacts
+   soupçon (des liens, des métadonnées), et on ne sort les artefacts
    voyants (secrets, schéma d'outil) que face à un client qui a déjà
    prouvé qu'il traite le contenu. Un scanner ne les verra jamais : ils ne
    seraient que gaspillés et repérables.
@@ -36,9 +36,9 @@ TRAP_TOOL_SCHEMA = "tool_schema"
 TRAP_SECRETS = "secrets"
 
 # Niveau d'engagement minimal requis pour déployer chaque piège.
-#  0 — rien de prouvé : uniquement ce qui passe pour des métadonnées
-#  1 — le client analyse la structure des réponses
-#  2 — le client raisonne sur le contenu
+#  0 : rien de prouvé, uniquement ce qui passe pour des métadonnées
+#  1 : le client analyse la structure des réponses
+#  2 : le client raisonne sur le contenu
 _MIN_ENGAGEMENT = {
     TRAP_MAZE: 0,
     TRAP_CANARY: 0,
@@ -94,7 +94,7 @@ def select_traps(state: Any, config: dict, rng) -> list[str]:
     director_cfg = config.get("trap_director", {})
     if not director_cfg.get("enabled", True):
         # Mode historique : tout poser à chaque réponse. Plus bruyant, plus
-        # facile à repérer — conservé pour comparaison et tests.
+        # facile à repérer, conservé pour comparaison et tests.
         return [TRAP_MAZE, TRAP_CANARY, TRAP_PHANTOM, TRAP_INJECTION,
                 TRAP_TOOL_SCHEMA, TRAP_SECRETS]
 
@@ -118,7 +118,7 @@ def select_traps(state: Any, config: dict, rng) -> list[str]:
     # Face à un client qui n'a toujours rien montré, on réduit la cadence
     # sans jamais couper : chaque canari occupe une entrée du registre
     # global, qu'un scanner massif saturerait. Mais l'arrêter tout à fait
-    # priverait de toute prise un agent qui se met à lire tardivement — et
+    # priverait de toute prise un agent qui se met à lire tardivement, et
     # c'est le canari qui rattrape la rotation d'identité.
     patience = director_cfg.get("give_up_after_unengaged_responses", 6)
     if level == 0 and spent >= patience:

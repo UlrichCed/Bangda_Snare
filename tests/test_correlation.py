@@ -162,7 +162,7 @@ def test_director_throttles_but_never_starves_an_inert_client(config):
     """Ralentir, pas couper.
 
     Chaque canari occupe une entrée du registre global qu'un scanner
-    massif saturerait — mais couper entièrement priverait de toute prise
+    massif saturerait, mais couper entièrement priverait de toute prise
     un agent qui se met à lire tardivement, et c'est le canari qui
     rattrape la rotation d'identité.
     """

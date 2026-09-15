@@ -256,7 +256,7 @@ def test_robots_trap_detects_honouring(config):
 
 
 def test_confess_gate_can_be_disabled(config):
-    """Sans la garde, un score élevé suffit — comportement explicitement opt-out."""
+    """Sans la garde, un score élevé suffit : comportement explicitement opt-out."""
     config["detection"]["confess_requires_discriminating_signal"] = False
     config["detection"]["weights"]["http_lib_useragent"] = 100
     tracker = SessionTracker(config)

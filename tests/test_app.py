@@ -231,11 +231,58 @@ def test_confessed_session_is_quarantined(client):
 
 
 def test_anti_fingerprint_headers(client):
+    """Portée limitée, à ne pas surinterpréter.
+
+    Ce test ne prouve que le comportement applicatif. En production
+    gunicorn réécrit l'en-tête Server après coup, donc c'est nginx qui
+    assure réellement le camouflage : vérifié à la main après déploiement,
+    pas ici.
+    """
     resp = client.get("/", headers=BROWSER_HEADERS)
     assert resp.headers.get("Server") == app_module.config["anti_fingerprint"][
         "fake_server_header"
     ]
     assert "X-Powered-By" not in resp.headers
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [("TRACE", "/api/v1/resources/1"), ("GET", "/api/v1/security/x/self-report")],
+)
+def test_error_pages_do_not_leak_the_stack(client, method, path):
+    """Les pages d'erreur par défaut de Werkzeug identifient la pile.
+
+    Un scanner reconnaît le gabarit « 405 Method Not Allowed » de Werkzeug
+    en une requête, ce qui ruine le reste du camouflage.
+    """
+    resp = client.open(path, method=method)
+    assert resp.status_code in (404, 405)
+    body = resp.data.lower()
+    for tell in (b"<!doctype html>", b"werkzeug", b"<h1>", b"flask"):
+        assert tell not in body
+
+
+def test_oversized_request_body_is_never_buffered(client):
+    """Sans plafond, Flask bufferisait en mémoire tout corps annoncé.
+
+    On vérifie que le corps n'est pas lu du tout : un payload dépassant la
+    limite et truffé de marqueurs d'échafaudage LLM ne doit déclencher
+    aucun signal, preuve qu'il n'a jamais été analysé.
+
+    Le honeypot répond normalement plutôt que par un 413 : annoncer la
+    limite renseignerait l'attaquant sur la pile qu'il a en face.
+    """
+    limit = app_module.app.config["MAX_CONTENT_LENGTH"]
+    assert limit and limit <= 1024 * 1024
+
+    payload = b'{"thought": "probing", "action_input": {}}' + b"x" * (limit + 1024)
+    resp = client.post(
+        "/graphql", data=payload, content_type="application/json", headers=SCANNER_HEADERS
+    )
+
+    assert resp.status_code < 500
+    session = app_module.tracker.all_sessions()[0]
+    assert "llm_artifacts_in_request" not in session.scored_signals
 
 
 def test_forged_forwarded_for_is_ignored_without_trusted_proxy(client, tmp_path):

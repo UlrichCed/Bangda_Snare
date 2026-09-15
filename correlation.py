@@ -2,13 +2,13 @@
 
 Une attaque menée par agent tourne rarement depuis une seule identité :
 proxies tournants, user-agent régénéré, cookies jetés. Le scoring par
-session, à lui seul, n'y résiste pas — chaque requête repart de zéro et
+session, à lui seul, n'y résiste pas : chaque requête repart de zéro et
 aucun seuil n'est jamais atteint.
 
 Deux mécanismes répondent à ça, d'une solidité très différente.
 
-**Rejeu de piège entre sessions (preuve).** Chaque piège posé — chemin de
-canari, token appât, chemin d'injection — est une valeur imprévisible
+**Rejeu de piège entre sessions (preuve).** Chaque piège posé : chemin de
+canari, token appât, chemin d'injection : est une valeur imprévisible
 tirée dans un espace immense, servie à *une* session. Si elle réapparaît
 dans une requête venue d'une autre session, il n'existe qu'une
 explication : le même opérateur est derrière les deux. L'information n'a
@@ -62,7 +62,7 @@ def client_signature(headers: dict) -> str:
 
     Repose sur l'ensemble *et l'ordre* des en-têtes envoyés, plus la valeur
     de quelques en-têtes structurants. Deux sessions d'un même agent la
-    partagent même après rotation complète d'identité — mais des clients
+    partagent même après rotation complète d'identité, mais des clients
     légitimes sans rapport aussi, d'où son statut d'indice.
     """
     names = [name.lower() for name in headers.keys() if name.lower() not in _VOLATILE_HEADERS]

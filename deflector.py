@@ -7,7 +7,7 @@ Deux propriétés structurent tout le module :
 
 **Déterminisme.** Tout le contenu servi pour une ressource donnée est
 dérivé d'un tirage semé par (session, chemin). Redemander la même URL
-renvoie exactement la même chose — comme une API réelle. Un contenu qui
+renvoie exactement la même chose : comme une API réelle. Un contenu qui
 change à chaque lecture serait le plus gros indice qu'on puisse offrir.
 
 **Parcimonie.** Le choix des pièges est délégué à `trap_director`, qui
@@ -38,7 +38,7 @@ def content_rng(session_id: str, path: str, config: dict, purpose: str = "") -> 
     élément de la réponse reçoit son **propre** tirage : sans cela, le
     résultat dépendrait de l'ordre de consommation d'un générateur partagé,
     et une réponse mémoïsée (qui saute l'étape de sélection) divergerait de
-    la première — exactement l'incohérence qu'on cherche à éviter.
+    la première : exactement l'incohérence qu'on cherche à éviter.
     """
     salt = config.get("canary", {}).get("derivation_salt", "honeypot-canary-v1")
     seed = hashlib.sha256(

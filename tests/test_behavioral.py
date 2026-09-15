@@ -1,5 +1,6 @@
 """Tests de l'empreinte comportementale LLM."""
 import json
+import time
 
 import pytest
 
@@ -66,6 +67,31 @@ def test_deeply_nested_body_is_bounded():
     node["thought"] = "hidden very deep"
     # Ne doit ni exploser ni partir en récursion infinie.
     assert isinstance(behavioral.detect_llm_artifacts(body_text=json.dumps(payload)), list)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "a" * 65536,
+        "ab " * 21000 + "!",
+        ("ab  " * 4 + "!") * 20000,
+        "/" * 65536,
+        "*" * 32768,
+    ],
+)
+def test_adversarial_input_stays_fast(payload):
+    """Régression ReDoS.
+
+    Le motif « langue naturelle » imbriquait deux quantificateurs et
+    partait en backtracking quadratique : une chaîne de 64 Ko sans espace
+    occupait un worker plus d'une minute. Une regex ne rendant jamais la
+    main à gevent, quelques requêtes suffisaient à faire tomber le
+    honeypot. Toute l'entrée analysée ici vient de l'attaquant, donc le
+    budget de temps fait partie du contrat.
+    """
+    started = time.monotonic()
+    behavioral.detect_llm_artifacts(query_string=payload, body_text=payload)
+    assert time.monotonic() - started < 0.5
 
 
 def test_inference_latency_band_is_recognised():
