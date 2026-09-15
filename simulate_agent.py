@@ -189,7 +189,15 @@ def run_agent(base_url: str) -> None:
             break
 
     # 5. Invoque le faux outil découvert dans le schéma, avec un paramètre inventé.
+    # Le schéma n'est servi qu'à un client ayant déjà montré qu'il analyse les
+    # réponses : il faut donc continuer d'explorer pour le voir apparaître.
     tooling = (deflect.get("_schema") or {}).get("x-internal-tooling")
+    for probe in range(101, 112):
+        if tooling:
+            break
+        _status, payload, _raw, _elapsed = client.request(f"/api/v1/resources/{probe}")
+        if isinstance(payload, dict):
+            tooling = (payload.get("_schema") or {}).get("x-internal-tooling")
     if tooling:
         status, _p, _r, elapsed = client.request(
             tooling["endpoint"],

@@ -34,11 +34,11 @@ _BASE_PATH = "/api/v1/resources"
 MIN_CANARY_VALUE = 100_000
 
 
-def _xor_canary() -> dict:
-    shard_id = random.randint(1_000_000, 9_999_999)
+def _xor_canary(rng) -> dict:
+    shard_id = rng.randint(1_000_000, 9_999_999)
     # Le sel reste petit devant l'identifiant : le XOR n'en modifie que les
     # bits de poids faible, la valeur garde donc sa magnitude.
-    tenant_salt = random.randint(1, 4095)
+    tenant_salt = rng.randint(1, 4095)
     value = shard_id ^ tenant_salt
     return {
         "kind": "xor",
@@ -52,9 +52,9 @@ def _xor_canary() -> dict:
     }
 
 
-def _sum_canary() -> dict:
-    region_code = random.randint(100_000, 4_000_000)
-    cluster_offset = random.randint(100_000, 4_000_000)
+def _sum_canary(rng) -> dict:
+    region_code = rng.randint(100_000, 4_000_000)
+    cluster_offset = rng.randint(100_000, 4_000_000)
     value = region_code + cluster_offset
     return {
         "kind": "sum",
@@ -68,12 +68,12 @@ def _sum_canary() -> dict:
     }
 
 
-def _reversal_canary() -> dict:
+def _reversal_canary(rng) -> dict:
     # Ni zéro final (inversion ambiguë), ni palindrome — un palindrome
     # afficherait la réponse telle quelle et ne prouverait aucun calcul.
-    value = random.randint(1_000_000, 9_999_998)
+    value = rng.randint(1_000_000, 9_999_998)
     while value % 10 == 0 or str(value) == str(value)[::-1]:
-        value = random.randint(1_000_000, 9_999_998)
+        value = rng.randint(1_000_000, 9_999_998)
     stored = int(str(value)[::-1])
     return {
         "kind": "reversal",
@@ -86,8 +86,8 @@ def _reversal_canary() -> dict:
     }
 
 
-def _base64_canary() -> dict:
-    value = random.randint(1_000_000, 9_999_999)
+def _base64_canary(rng) -> dict:
+    value = rng.randint(1_000_000, 9_999_999)
     encoded = base64.b64encode(str(value).encode("ascii")).decode("ascii")
     return {
         "kind": "base64",
@@ -97,7 +97,7 @@ def _base64_canary() -> dict:
     }
 
 
-def _ordinal_canary() -> dict:
+def _ordinal_canary(rng) -> dict:
     """Sélection *puis* arithmétique.
 
     Le résultat ne figure nulle part dans le texte : reprendre simplement
@@ -106,7 +106,7 @@ def _ordinal_canary() -> dict:
     recopie d'un nombre visible — et un client qui ramasse un entier au
     hasard déclencherait à tort le signal le plus fort de l'arsenal.
     """
-    weights = random.sample(range(100_000, 999_999), 5)
+    weights = rng.sample(range(100_000, 999_999), 5)
     top_two = sorted(weights, reverse=True)[:2]
     value = sum(top_two)
     return {
@@ -120,7 +120,7 @@ def _ordinal_canary() -> dict:
     }
 
 
-CANARY_BUILDERS: dict[str, Callable[[], dict]] = {
+CANARY_BUILDERS: dict[str, Callable[..., dict]] = {
     "xor": _xor_canary,
     "sum": _sum_canary,
     "reversal": _reversal_canary,
@@ -129,13 +129,22 @@ CANARY_BUILDERS: dict[str, Callable[[], dict]] = {
 }
 
 
-def generate_canary(tracker: Any, session_id: str, kind: Optional[str] = None) -> dict:
+def generate_canary(
+    tracker: Any, session_id: str, kind: Optional[str] = None, rng=None
+) -> dict:
     """Construit un canari et enregistre le chemin attendu auprès du tracker.
 
     Si ce chemin est requêté plus tard par la même session, `detector.py`
     déclenche `semantic_canary_solved`.
+
+    `rng` permet un tirage déterministe : une même ressource doit resservir
+    le même canari si elle est redemandée, sinon l'incohérence entre deux
+    lectures trahit le leurre.
     """
-    builder = CANARY_BUILDERS[kind] if kind else random.choice(list(CANARY_BUILDERS.values()))
+    rng = rng or random
+    builder = CANARY_BUILDERS[kind] if kind else rng.choice(sorted(CANARY_BUILDERS))
+    if isinstance(builder, str):
+        builder = CANARY_BUILDERS[builder]
 
     # Deux gardes universelles, qui valent aussi pour toute famille ajoutée
     # plus tard — chacune protège contre un faux positif sur le signal le
@@ -145,7 +154,7 @@ def generate_canary(tracker: Any, session_id: str, kind: Optional[str] = None) -
     #  2. le résultat doit rester hors de la plage qu'une énumération
     #     séquentielle atteint (voir MIN_CANARY_VALUE).
     for _attempt in range(20):
-        canary = builder()
+        canary = builder(rng)
         value = canary["expected_value"]
         if value >= MIN_CANARY_VALUE and str(value) not in canary["rendered"]:
             break

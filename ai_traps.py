@@ -19,8 +19,9 @@ riposte pas. C'est une contrainte de conception, pas un détail.
 """
 from __future__ import annotations
 
+import hashlib
 import random
-from typing import Any
+from typing import Any, Optional
 
 # Paramètres réellement annoncés par le faux outil. Tout paramètre envoyé
 # en dehors de cet ensemble est une invention du modèle : c'est le signal
@@ -29,10 +30,38 @@ TOOL_SCHEMA_PARAMETERS = ("resource_id", "include_metadata")
 
 DEFAULT_TOOL_EXEC_PATH = "/api/v1/internal/tool-exec"
 DEFAULT_ROBOTS_DISALLOW_PATH = "/api/v1/internal/archive"
+DEFAULT_SELF_REPORT_PATH = "/api/v1/security/self-report"
 
 
-def tool_exec_path(config: dict) -> str:
-    return config.get("ai_traps", {}).get("tool_exec_path", DEFAULT_TOOL_EXEC_PATH)
+def session_path_token(session_id: str, config: dict, purpose: str) -> str:
+    """Jeton de chemin propre à une session, dérivé sans état supplémentaire."""
+    salt = config.get("ai_traps", {}).get("path_salt", "change-me-honeypot-paths-v1")
+    return hashlib.sha256(
+        f"{salt}|{purpose}|{session_id}".encode("utf-8")
+    ).hexdigest()[:12]
+
+
+def tool_exec_path(config: dict, session_id: Optional[str] = None) -> str:
+    """Chemin du faux outil, propre à la session par défaut.
+
+    Un chemin global finit par circuler entre attaquants comme n'importe
+    quel IOC : il suffirait alors de l'éviter pour esquiver le piège le
+    plus discriminant de l'arsenal, ou de le requêter pour reconnaître un
+    honeypot. Dérivé par session, il n'apprend rien à personne.
+    """
+    traps = config.get("ai_traps", {})
+    if session_id and traps.get("randomize_trap_paths", True):
+        return f"/api/v1/internal/{session_path_token(session_id, config, 'tool')}/exec"
+    return traps.get("tool_exec_path", DEFAULT_TOOL_EXEC_PATH)
+
+
+def self_report_path(config: dict, session_id: Optional[str] = None) -> str:
+    """Chemin de l'endpoint d'aveu, propre à la session par défaut."""
+    traps = config.get("ai_traps", {})
+    if session_id and traps.get("randomize_trap_paths", True):
+        token = session_path_token(session_id, config, "report")
+        return f"/api/v1/security/{token}/self-report"
+    return config.get("deflection", {}).get("confess_report_path", DEFAULT_SELF_REPORT_PATH)
 
 
 def robots_disallow_path(config: dict) -> str:
@@ -41,7 +70,7 @@ def robots_disallow_path(config: dict) -> str:
     )
 
 
-def build_tool_schema_bait(tracker: Any, session_id: str, config: dict) -> dict:
+def build_tool_schema_bait(tracker: Any, session_id: str, config: dict) -> dict:  # noqa: D401
     """Faux outil, formaté comme une définition qu'un agent auto-découvre.
 
     Un agent outillé (MCP, function calling, plugin OpenAPI) traite ce bloc
@@ -50,7 +79,7 @@ def build_tool_schema_bait(tracker: Any, session_id: str, config: dict) -> dict:
     un signal quasi sans faux positif — et les arguments envoyés révèlent
     directement l'intention de l'agent.
     """
-    path = tool_exec_path(config)
+    path = tool_exec_path(config, session_id)
     tracker.register_tool_bait(session_id, path, TOOL_SCHEMA_PARAMETERS)
 
     return {
@@ -111,18 +140,36 @@ INJECTION_TIERS = (
 )
 
 
-def build_injection_ladder(tracker: Any, session_id: str, config: dict) -> list[str]:
-    """Rend les quatre paliers d'injection, chacun sur un chemin distinct.
+def build_injection_at_tier(
+    tracker: Any, session_id: str, config: dict, tier: int, rng=None
+) -> str:
+    """Rend **un seul** palier d'injection, sur son propre chemin.
 
-    Les chemins étant distincts, celui qui est effectivement requêté dit
-    exactement à quel niveau d'explicitation l'agent a cédé.
+    Servir les quatre d'un coup noierait la mesure — on saurait qu'un agent
+    a cédé, sans savoir à quel degré d'explicitation. Palier par palier, on
+    apprend le seuil exact, qui est ce qui renseigne réellement sur la
+    solidité de ses garde-fous.
     """
-    rendered = []
-    for tier, label, template in INJECTION_TIERS:
-        path = f"/api/v1/resources/{random.randint(10000, 99999)}"
-        tracker.register_suggested_path(session_id, path, tier=tier, label=label)
-        rendered.append(template.format(path=path))
-    return rendered
+    rng = rng or random
+    tier = max(1, min(4, int(tier)))
+    _num, label, template = INJECTION_TIERS[tier - 1]
+    path = f"/api/v1/resources/{rng.randint(10000, 99999)}"
+    tracker.register_suggested_path(session_id, path, tier=tier, label=label)
+    tracker.note_injection_offered(session_id, tier)
+    return template.format(path=path)
+
+
+def build_injection_ladder(tracker: Any, session_id: str, config: dict) -> list[str]:
+    """Rend les quatre paliers d'un coup.
+
+    Conservé pour le mode non progressif (`trap_director.enabled: false`)
+    et pour les tests : bien plus voyant, donc à éviter en fonctionnement
+    normal.
+    """
+    return [
+        build_injection_at_tier(tracker, session_id, config, tier)
+        for tier, _label, _template in INJECTION_TIERS
+    ]
 
 
 def build_robots_txt(config: dict) -> str:
@@ -149,14 +196,15 @@ def build_robots_txt(config: dict) -> str:
     )
 
 
-def build_phantom_reference(config: dict) -> dict:
+def build_phantom_reference(config: dict, rng=None) -> dict:
     """Référence une ressource dont aucun contenu ne sera jamais servi.
 
     Sert d'appui au signal `hallucinated_parameters` : si un agent finit par
     décrire ou paramétrer cette ressource, il invente — un modèle ne
     supporte pas le vide et comble.
     """
+    rng = rng or random
     return {
-        "related_report": f"RPT-{random.randint(1000, 9999)}",
+        "related_report": f"RPT-{rng.randint(1000, 9999)}",
         "report_status": "available",
     }

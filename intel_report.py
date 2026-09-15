@@ -63,6 +63,38 @@ def load_events(log_path: str, since: Optional[datetime]) -> list[dict]:
     return events
 
 
+def _build_campaigns(events: list[dict]) -> dict:
+    """Reconstitue les campagnes depuis les rattachements journalisés.
+
+    Union-find, pour que A-B puis B-C forment bien un seul groupe. Seuls
+    les groupes de plus d'une session sont retournés.
+    """
+    parent: dict[str, str] = {}
+
+    def find(node: str) -> str:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(a: str, b: str) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_b] = root_a
+
+    for event in events:
+        session_id = event.get("session_id")
+        for linked in event.get("linked_sessions") or []:
+            if session_id and linked:
+                union(session_id, linked)
+
+    grouped: dict[str, set] = {}
+    for node in parent:
+        grouped.setdefault(find(node), set()).add(node)
+    return {root: members for root, members in grouped.items() if len(members) > 1}
+
+
 def build_report(events: list[dict]) -> str:
     lines = []
     lines.append("# Rapport de renseignement — Honeypot HTTP/API")
@@ -172,6 +204,28 @@ def build_report(events: list[dict]) -> str:
     else:
         lines.append("Aucune.")
     lines.append("")
+
+    campaigns = _build_campaigns(events)
+    if campaigns:
+        lines.append("## Campagnes (identités reliées)")
+        lines.append("")
+        lines.append(
+            "Sessions reliées par le rejeu d'un piège servi à une autre "
+            "identité. La valeur rejouée étant imprévisible, elle n'a pas pu "
+            "circuler autrement : le même opérateur est derrière les deux. "
+            "C'est ce qui défait la rotation d'IP et de user-agent."
+        )
+        lines.append("")
+        for index, (_root, members) in enumerate(sorted(campaigns.items()), start=1):
+            ips = sorted({sessions[s]["ip"] for s in members if s in sessions and sessions[s]["ip"]})
+            agents = sorted(
+                {ua for s in members if s in sessions for ua in sessions[s]["user_agents"]}
+            )
+            lines.append(f"- **Campagne {index}** — {len(members)} sessions")
+            lines.append(f"  - sessions : {', '.join(f'`{s[:12]}`' for s in sorted(members))}")
+            lines.append(f"  - IPs : {', '.join(ips) or '-'}")
+            lines.append(f"  - user-agents : {', '.join(a[:48] for a in agents) or '-'}")
+        lines.append("")
 
     if tool_invocations:
         lines.append("## Invocations du faux outil")
