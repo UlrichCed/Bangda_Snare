@@ -147,6 +147,31 @@ def test_no_combination_of_behavioural_signals_reaches_confess(config):
     assert state.mode(40, 80) == MODE_DEFLECT
 
 
+def test_latency_signature_ignores_tarpitted_intervals(config):
+    """Le tarpit impose sa propre cadence : la mesurer serait mesurer nous-mêmes.
+
+    Une fois la session déroutée, les intervalles observés sont dictés par
+    nos délais, plus par le temps de réflexion du client.
+    """
+    tracker = SessionTracker(config)
+    sid = new_session(tracker)
+    state = tracker.get(sid)
+
+    # On avance jusqu'au déroutage, sans présumer à quelle requête il survient.
+    for i in range(1, 12):
+        drive(tracker, sid, [f"/api/v1/resources/{i}"], SCANNER_HEADERS)
+        if state.was_deflected:
+            break
+    assert state.was_deflected, "le scanner doit finir par être dérouté"
+    collected_before = len(state.all_intervals)
+
+    for i in range(20, 40):
+        drive(tracker, sid, [f"/api/v1/resources/{i}"], SCANNER_HEADERS)
+
+    assert len(state.all_intervals) == collected_before
+    assert "inference_latency_signature" not in state.scored_signals
+
+
 def test_maze_traversal_is_discriminating(config):
     """Suivre un lien du labyrinthe prouve l'analyse de la réponse."""
     tracker = SessionTracker(config)

@@ -119,6 +119,9 @@ class SessionState:
 
     confessed: bool = False
     alerted_high_score: bool = False
+    # Vrai dès que la session a reçu une réponse ralentie par le tarpit : à
+    # partir de là, la cadence observée n'est plus la sienne.
+    was_deflected: bool = False
     request_count: int = 0
     ip: Optional[str] = None
     last_user_agent: Optional[str] = None
@@ -373,7 +376,12 @@ class SessionTracker:
 
             if state.request_timestamps:
                 interval = now - state.request_timestamps[-1]
-                state.all_intervals.append(interval)
+                # La signature de latence ne vaut que sur des intervalles que
+                # le client contrôle seul. Dès le déroutage, le tarpit impose
+                # lui-même une cadence dans la bande « inférence » : continuer
+                # à mesurer reviendrait à observer notre propre délai.
+                if not state.was_deflected:
+                    state.all_intervals.append(interval)
                 if interval < 0.5:
                     fire("fast_sequential_requests")
 
@@ -472,6 +480,8 @@ class SessionTracker:
                 self.confess_threshold,
                 self.require_discriminating,
             )
+            if mode != MODE_NORMAL:
+                state.was_deflected = True
             return state.score, newly_scored, mode
 
     def all_sessions(self) -> list[SessionState]:
