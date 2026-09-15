@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ app_name }} &mdash; Sign in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: -apple-system, Arial, sans-serif; background: #f4f5f7; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .box { background: #fff; padding: 2rem; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,.1); width: 320px; }
+    label { display: block; margin-top: 1rem; font-size: .85rem; color: #4a5568; }
+    input { width: 100%; padding: .5rem; margin-top: .25rem; box-sizing: border-box; border: 1px solid #cbd5e0; border-radius: 4px; }
+    button { margin-top: 1.5rem; width: 100%; padding: .6rem; background: #1c2b3a; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    .err { color: #b23; font-size: .85rem; margin-top: .75rem; }
+  </style>
+</head>
+<body>
+  <form class="box" method="post" action="/admin">
+    <h2>{{ app_name }}</h2>
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+  </form>
+</body>
+</html>
