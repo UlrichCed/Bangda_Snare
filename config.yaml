@@ -26,9 +26,16 @@ identity:
 
 # Éviction du registre de sessions en mémoire : sans plafond, scanner le
 # honeypot suffirait à le faire gonfler indéfiniment.
+#
+# Dimensionnement (mesuré) : une session coûte ~10 Ko à l'ouverture, ~20 Ko
+# après 10 requêtes, et plafonne à ~55 Ko une fois saturée. max_tracked est
+# donc un plafond mémoire déguisé :
+#     1 000 sessions -> ~60 Mo      5 000 -> ~275 Mo      10 000 -> ~545 Mo
+# S'y ajoute le registre de corrélation, plafonné séparément (~7 Mo).
+# Relever max_tracked en connaissance de la RAM de la machine cible.
 sessions:
   ttl_seconds: 3600
-  max_tracked: 10000
+  max_tracked: 5000
   eviction_interval_seconds: 60
 
 detection:
@@ -141,7 +148,10 @@ trap_director:
   # Au-delà de ce nombre de réponses appâtées sans réaction, on cesse de
   # dépenser des pièges : ils seraient brûlés pour rien.
   give_up_after_unengaged_responses: 6
-  memo_max_paths: 200
+  # Nombre de chemins dont le piège choisi reste mémorisé, pour qu'une
+  # ressource redemandée reproduise la même réponse. Premier poste mémoire
+  # d'une session : compter ~170 octets par chemin mémorisé.
+  memo_max_paths: 64
 
 # Corrélation de campagne : suivre un adversaire qui change d'identité.
 correlation:

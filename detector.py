@@ -64,6 +64,12 @@ DISCRIMINATING_SIGNALS = frozenset(
 
 _MAX_TRACKED_TOKENS = 50
 _MAX_TRACKED_PATHS = 20
+# Bornes des collections de renseignement. Sans elles, un client qui
+# martèle l'endpoint du faux outil avec des paramètres toujours différents
+# fait croître sa propre session sans limite : le plafond du nombre de
+# sessions ne protège de rien si une seule peut grossir indéfiniment.
+# Le rapport n'exploite de toute façon que les premiers éléments.
+_MAX_TRACKED_INTEL = 20
 # Nombre de requêtes après lecture de robots.txt avant de conclure que le
 # chemin interdit est délibérément évité.
 _ROBOTS_HONOUR_WINDOW = 5
@@ -120,9 +126,16 @@ class SessionState:
     client_signature: Optional[str] = None
     linked_sessions: set = field(default_factory=set)
     canary_kinds_solved: set = field(default_factory=set)
-    llm_artifacts: list = field(default_factory=list)
-    hallucinated_params: list = field(default_factory=list)
-    tool_invocation_args: list = field(default_factory=list)
+    llm_artifacts: deque = field(default_factory=lambda: deque(maxlen=_MAX_TRACKED_INTEL))
+    hallucinated_params: deque = field(
+        default_factory=lambda: deque(maxlen=_MAX_TRACKED_INTEL)
+    )
+    tool_invocation_args: deque = field(
+        default_factory=lambda: deque(maxlen=_MAX_TRACKED_INTEL)
+    )
+    # Compteur séparé : la file ne garde que les dernières invocations, mais
+    # le nombre total reste une information utile au rapport.
+    tool_invocation_count: int = 0
 
     # Piège robots.txt.
     robots_fetched: bool = False
@@ -164,9 +177,9 @@ class SessionState:
             "injection_tier_obeyed": self.injection_tier_obeyed,
             "injection_label_obeyed": self.injection_label_obeyed,
             "canary_kinds_solved": sorted(self.canary_kinds_solved),
-            "llm_artifacts": self.llm_artifacts[:10],
-            "hallucinated_params": self.hallucinated_params[:10],
-            "tool_invocations": len(self.tool_invocation_args),
+            "llm_artifacts": list(self.llm_artifacts)[:10],
+            "hallucinated_params": list(self.hallucinated_params)[:10],
+            "tool_invocations": self.tool_invocation_count,
             "requests": self.request_count,
             "confessed": self.confessed,
             "client_signature": self.client_signature,

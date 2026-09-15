@@ -428,6 +428,7 @@ def tool_exec(token=None):
 
     if state is not None:
         state.tool_invocation_args.append(args)
+        state.tool_invocation_count += 1
         state.hallucinated_params.extend(invented)
 
     # Le palier doit être recalculé après le déclenchement : l'invocation
