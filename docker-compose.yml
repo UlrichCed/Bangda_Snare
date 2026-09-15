@@ -1,0 +1,25 @@
+services:
+  honeypot:
+    build: .
+    # Pas de ports exposés publiquement ici : on écoute sur la loopback et
+    # c'est nginx (hôte ou conteneur séparé) qui termine le TLS.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      # Mot de passe SMTP : jamais dans config.yaml, injecté au runtime.
+      HONEYPOT_SMTP_PASSWORD: "${HONEYPOT_SMTP_PASSWORD:-}"
+      # Optionnel, seulement si llm_assist.enabled est activé.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+    volumes:
+      - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+    # Isolation : le honeypot n'a aucune raison d'écrire ailleurs que dans
+    # /app/logs, ni d'acquérir de nouveaux privilèges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
