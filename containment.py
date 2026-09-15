@@ -86,7 +86,7 @@ def build_context_attrition(config: dict, tier: str) -> list[str]:
     """Remplissage plausible, borné, pour user le contexte de l'agent.
 
     Retourne une liste de fausses lignes de log. Volume plafonné par
-    `containment.max_filler_bytes` — la borne est la garantie que ce
+    `containment.max_filler_bytes` : la borne est la garantie que ce
     mécanisme reste une mesure d'usure et ne devient pas une attaque par
     épuisement de ressources.
     """

@@ -1,6 +1,6 @@
 # Configuration centralisée du honeypot HTTP/API anti-attaques-IA.
 # Renseigner identity.production_domain et identity.decoy_hostname avant tout
-# déploiement réel — ne jamais laisser ces valeurs génériques en production.
+# déploiement réel : ne jamais laisser ces valeurs génériques en production.
 
 server:
   host: "0.0.0.0"
@@ -12,6 +12,10 @@ server:
   # n'importe qui peut forger l'en-tête et fausser l'attribution d'IP.
   # Exemple derrière un nginx local : ["127.0.0.1/32", "::1/128"]
   trusted_proxies: []
+  # Plafond du corps des requêtes. Sans lui, Flask bufferise en mémoire
+  # tout ce que le client annonce : un POST de 64 Mo passait, et un
+  # millier de connexions concurrentes suffisait à épuiser la mémoire.
+  max_request_body_bytes: 65536
 
 identity:
   # À remplacer par le vrai domaine de production que ce honeypot imite.
@@ -114,9 +118,9 @@ ai_traps:
   # circuler entre attaquants comme n'importe quel IOC : il suffirait de
   # l'éviter pour esquiver le piège, ou de le requêter pour reconnaître un
   # honeypot. À personnaliser.
-  # Le canari est assez discret pour etre pose des la premiere reponse,
-  # avant tout deroutage. Sans cela, un adversaire qui change d'identite a
-  # chaque requete ne recoit jamais de piege et ne laisse aucune prise.
+  # Le canari est assez discret pour être posé dès la première réponse,
+  # avant tout déroutage. Sans cela, un adversaire qui change d'identité à
+  # chaque requête ne reçoit jamais de piège et ne laisse aucune prise.
   plant_canary_in_normal_responses: true
   randomize_trap_paths: true
   path_salt: "change-me-honeypot-paths-v1"
@@ -196,6 +200,12 @@ llm_assist:
 
 anti_fingerprint:
   enabled: true
+  # ATTENTION : gunicorn réécrit lui-même l'en-tête Server après le passage
+  # de l'application, donc cette valeur n'a AUCUN effet sous gunicorn seul
+  # (elle ne s'applique qu'au serveur de développement). En production,
+  # c'est nginx qui masque l'en-tête amont et pose le sien : d'où
+  # l'obligation du reverse proxy, qui n'est pas qu'une question de TLS.
+  # Vérifier après déploiement : curl -sD- -o /dev/null https://.../ | grep -i server
   fake_server_header: "nginx"
   remove_headers:
     - "X-Powered-By"

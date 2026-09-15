@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rapport SOC périodique — agrège logs/honeypot.jsonl en Markdown.
+"""Rapport SOC périodique : agrège logs/honeypot.jsonl en Markdown.
 
 Usage:
     python intel_report.py --since 24h
@@ -97,7 +97,7 @@ def _build_campaigns(events: list[dict]) -> dict:
 
 def build_report(events: list[dict]) -> str:
     lines = []
-    lines.append("# Rapport de renseignement — Honeypot HTTP/API")
+    lines.append("# Rapport de renseignement : Honeypot HTTP/API")
     lines.append("")
     lines.append(f"Généré le {datetime.now(timezone.utc).isoformat()} UTC.")
     lines.append(f"Évènements analysés : {len(events)}")
@@ -221,7 +221,7 @@ def build_report(events: list[dict]) -> str:
             agents = sorted(
                 {ua for s in members if s in sessions for ua in sessions[s]["user_agents"]}
             )
-            lines.append(f"- **Campagne {index}** — {len(members)} sessions")
+            lines.append(f"- **Campagne {index}** : {len(members)} sessions")
             lines.append(f"  - sessions : {', '.join(f'`{s[:12]}`' for s in sorted(members))}")
             lines.append(f"  - IPs : {', '.join(ips) or '-'}")
             lines.append(f"  - user-agents : {', '.join(a[:48] for a in agents) or '-'}")
@@ -232,7 +232,7 @@ def build_report(events: list[dict]) -> str:
         lines.append("")
         lines.append(
             "Atteindre cet endpoint suppose d'avoir lu un schéma d'outil dans une "
-            "réponse et décidé de l'invoquer — comportement d'agent outillé. Les "
+            "réponse et décidé de l'invoquer : comportement d'agent outillé. Les "
             "arguments renseignent directement sur l'intention."
         )
         lines.append("")
@@ -241,7 +241,7 @@ def build_report(events: list[dict]) -> str:
             lines.append(
                 f"- `{(ev.get('session_id') or '?')[:12]}` depuis {ev.get('ip', '?')} : "
                 f"`{json.dumps(ev.get('arguments', {}), ensure_ascii=False)}`"
-                + (f" — paramètres inventés : {', '.join(invented)}" if invented else "")
+                + (f" (paramètres inventés : {', '.join(invented)})" if invented else "")
             )
         lines.append("")
 
@@ -275,7 +275,7 @@ def build_report(events: list[dict]) -> str:
             ip = c.get("ip", "?")
             declared = c.get("confession", {})
             analysis = c.get("analysis")
-            lines.append(f"### Session `{sid[:12]}` — IP {ip}")
+            lines.append(f"### Session `{sid[:12]}` : IP {ip}")
             lines.append("")
             lines.append("```json")
             lines.append(json.dumps(declared, ensure_ascii=False, indent=2))

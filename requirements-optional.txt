@@ -1,3 +1,3 @@
-# Dépendances optionnelles — n'installer que si llm_assist.enabled: true.
+# Dépendances optionnelles : n'installer que si llm_assist.enabled: true.
 # Le honeypot fonctionne sans, avec un repli explicite (voir llm_assist.py).
 anthropic>=0.40,<1.0

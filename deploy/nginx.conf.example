@@ -33,9 +33,14 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/honeypot.example.invalid/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    # Le honeypot usurpe déjà l'en-tête Server côté applicatif ; on évite que
-    # nginx ne le contredise en annonçant sa propre version.
+    # Le camouflage de la pile se joue ICI, pas dans l'application : gunicorn
+    # réécrit l'en-tête Server après le passage de Flask, donc
+    # anti_fingerprint.fake_server_header n'a aucun effet sous gunicorn seul.
+    # nginx masque l'en-tête amont par défaut et pose le sien ; server_tokens
+    # off retire le numéro de version. proxy_hide_header est redondant avec le
+    # comportement par défaut, mais explicite l'intention.
     server_tokens off;
+    proxy_hide_header Server;
 
     limit_req zone=honeypot burst=20 nodelay;
     limit_conn honeypot_conn 10;

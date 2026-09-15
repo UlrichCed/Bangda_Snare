@@ -7,9 +7,9 @@ propriétés prouvées sur la session.
 Les signaux sont répartis en deux familles, et c'est cette séparation qui
 porte toute la valeur de l'outil :
 
-- **comportementaux** — reproductibles par un outillage non-IA (UA, headers
+- **comportementaux** : reproductibles par un outillage non-IA (UA, headers
   manquants, cadence, énumération). Ils ne suffisent jamais à conclure ;
-- **discriminants** — ils exigent que le client ait *traité* le contenu
+- **discriminants** : ils exigent que le client ait *traité* le contenu
   servi ou se comporte en agent outillé. Hors de portée d'un script
   d'énumération.
 
@@ -98,7 +98,7 @@ class SessionState:
     bait_tokens_issued: deque = field(
         default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS)
     )
-    # (chemin, palier, libellé) — le palier obéi mesure la solidité des
+    # (chemin, palier, libellé) : le palier obéi mesure la solidité des
     # garde-fous de l'agent contre l'injection de prompt.
     suggested_paths: deque = field(default_factory=lambda: deque(maxlen=_MAX_TRACKED_TOKENS))
     # (chemin, famille de calcul)
