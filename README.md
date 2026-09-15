@@ -211,6 +211,33 @@ python intel_report.py --since all
 python intel_report.py --since all --ioc-out iocs.json
 ```
 
+## Performance mesurée
+
+Mesures prises sur une instance gunicorn/gevent à un worker, pas des
+estimations.
+
+| Ce qui est mesuré | Résultat |
+|---|---|
+| Pipeline de détection, par requête | 61 µs médian, 106 µs au p99 |
+| Génération d'une réponse de déroutage | 55 µs médian |
+| Débit hors tarpit | ~16 000 req/s théoriques sur un cœur |
+| 500 connexions simultanées sous tarpit | 7,0 s au total, 0 erreur, 46 Mo |
+
+Le point important est la dernière ligne. Le temps total reste **plat** de
+50 à 500 connexions simultanées (6,7 s, 6,9 s, 7,0 s) : le tarpit coûte du
+temps à l'attaquant sans coûter de ressources au honeypot. C'est ce que
+permettent les workers gevent, et c'est perdu avec des workers sync.
+
+La détection n'est jamais le facteur limitant : 61 µs par requête sont
+négligeables devant les secondes que le tarpit ajoute délibérément.
+
+**Mémoire.** Une session coûte ~10 Ko à l'ouverture, ~20 Ko après dix
+requêtes, et plafonne à ~55 Ko une fois saturée. `sessions.max_tracked`
+est donc un plafond mémoire déguisé : 5 000 sessions (le défaut) tiennent
+dans ~275 Mo au pire cas, et le registre de corrélation ajoute au plus
+7 Mo. Le calcul est détaillé dans `config.yaml`, à relire avant de relever
+la valeur.
+
 ## Déploiement
 
 Le serveur de dev Flask n'est pas déployable. Utiliser gunicorn :
